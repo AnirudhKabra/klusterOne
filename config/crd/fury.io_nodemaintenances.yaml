@@ -1,0 +1,93 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nodemaintenances.fury.io
+spec:
+  group: fury.io
+  scope: Cluster
+  names:
+    kind: NodeMaintenance
+    listKind: NodeMaintenanceList
+    plural: nodemaintenances
+    singular: nodemaintenance
+    shortNames:
+      - nm
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Nodes
+          type: integer
+          jsonPath: .status.nodes[*].name
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion: { type: string }
+            kind:       { type: string }
+            metadata:   { type: object }
+            spec:
+              type: object
+              required: [actions]
+              properties:
+                nodeSelector:
+                  type: object
+                  additionalProperties: { type: string }
+                nodeNames:
+                  type: array
+                  items: { type: string }
+                actions:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [type]
+                    properties:
+                      type:
+                        type: string
+                        enum: [Cordon, Drain, Uncordon]
+                      drainOptions:
+                        type: object
+                        properties:
+                          gracePeriodSeconds: { type: integer, format: int64 }
+                          timeoutSeconds:     { type: integer, format: int64 }
+                          ignoreDaemonSets:   { type: boolean }
+                strategy:
+                  type: object
+                  properties:
+                    maxUnavailable:
+                      type: integer
+                      minimum: 1
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, InProgress, Completed, Failed]
+                startTime:      { type: string, format: date-time }
+                completionTime: { type: string, format: date-time }
+                nodes:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, phase]
+                    properties:
+                      name:  { type: string }
+                      phase:
+                        type: string
+                        enum: [Pending, InProgress, Completed, Failed]
+                      currentAction: { type: string }
+                      completedActions:
+                        type: array
+                        items: { type: string }
+                      message: { type: string }
+                      lastTransitionTime: { type: string, format: date-time }

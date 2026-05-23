@@ -1,0 +1,17 @@
+apiVersion: fury.io/v1alpha1
+kind: NodeMaintenance
+metadata:
+  name: rolling-drain-workers
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  strategy:
+    maxUnavailable: 1
+  actions:
+    - type: Cordon
+    - type: Drain
+      drainOptions:
+        ignoreDaemonSets: true
+        gracePeriodSeconds: 30
+        timeoutSeconds: 300
+    - type: Uncordon
