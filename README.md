@@ -258,6 +258,32 @@ status:
       lastTransitionTime: 2026-05-24T10:00:42Z
 ```
 
+## Updating the CRD after a spec change
+
+When you add or change a field in `api/v1alpha1/nodemaintenance_types.go`, two artifacts have to be regenerated in lockstep with the Go types:
+
+- `api/v1alpha1/zz_generated.deepcopy.go` — `DeepCopy*` methods the controller needs to compile.
+- `config/crd/ko.io_nodemaintenances.yaml` — the cluster-side schema (the API server silently drops fields not declared here).
+
+Both are produced from kubebuilder markers (`+kubebuilder:validation:*`, `+kubebuilder:printcolumn:*`, etc.) on the Go types via `controller-gen`.
+
+```bash
+# 1. Edit api/v1alpha1/nodemaintenance_types.go — add the field and any markers
+#    (e.g. +kubebuilder:validation:Minimum=1, +kubebuilder:validation:Enum=...).
+
+# 2. Regenerate the deepcopy methods.
+make generate
+
+# 3. Regenerate the CRD schema.
+make manifests
+
+# 4. Apply the new CRD to the cluster and rebuild the controller / CLI.
+make install-crd
+make build install-cli
+```
+
+`controller-gen` is auto-downloaded into `./bin/controller-gen` on first invocation; override the pinned version with `make manifests CONTROLLER_GEN_VERSION=v0.17.0`.
+
 ## Layout
 
 ```
@@ -274,6 +300,7 @@ status:
 │   ├── cli/                      # kubectl-nm subcommands
 │   ├── controller/               # controller-runtime reconciler
 │   └── orchestrator/             # state machine + maxUnavailable/atOnce gate
+├── bin/                          # local toolchain (controller-gen, build outputs) — gitignored
 ├── Dockerfile
 ├── Makefile
 └── go.mod

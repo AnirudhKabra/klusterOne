@@ -5,15 +5,18 @@ import (
 )
 
 // ActionType identifies a node lifecycle action.
+// +kubebuilder:validation:Enum=Cordon;Drain;Uncordon;Script
 type ActionType string
 
 const (
 	ActionCordon   ActionType = "Cordon"
 	ActionDrain    ActionType = "Drain"
 	ActionUncordon ActionType = "Uncordon"
+	ActionScript   ActionType = "Script"
 )
 
 // Phase is the high-level state of a NodeMaintenance object or a single node.
+// +kubebuilder:validation:Enum=Pending;InProgress;Completed;Failed
 type Phase string
 
 const (
@@ -25,28 +28,98 @@ const (
 
 // NodeMaintenanceSpec is the desired state of a node maintenance run.
 type NodeMaintenanceSpec struct {
-	// NodeSelector selects target nodes by labels. Ignored when NodeNames is set.
+	// Paused, when true, stops the controller from advancing the run. The
+	// CLI uses this for the attach-then-run workflow:
+	//   kubectl nm create ... --paused
+	//   kubectl nm attach <name> ./script.sh
+	//   kubectl nm run <name>
+	// +optional
+	Paused bool `json:"paused,omitempty"`
+
+	// AllNodes, when true, targets every node in the cluster and ignores
+	// NodeSelector / NodeNames.
+	// +optional
+	AllNodes bool `json:"allNodes,omitempty"`
+
+	// NodeSelector selects target nodes by labels. Ignored when NodeNames is
+	// set or AllNodes is true.
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
 	// NodeNames is an explicit list of node names to act on. Takes precedence
-	// over NodeSelector when non-empty.
+	// over NodeSelector when non-empty. Ignored when AllNodes is true.
 	// +optional
 	NodeNames []string `json:"nodeNames,omitempty"`
 
+	// Script attaches a single user script to this run. When non-nil and
+	// Actions is empty, the controller synthesizes a default action sequence
+	// of [Cordon, Script, Uncordon].
+	// +optional
+	Script *ScriptSpec `json:"script,omitempty"`
+
 	// Actions is the ordered list of actions executed against every target
-	// node. Each node moves through the full sequence before being marked
-	// Completed.
-	Actions []ActionSpec `json:"actions"`
+	// node. When empty and Script is set, defaults to [Cordon, Script, Uncordon].
+	// +optional
+	Actions []ActionSpec `json:"actions,omitempty"`
 
 	// Strategy controls global safety constraints during the run.
 	// +optional
 	Strategy Strategy `json:"strategy,omitempty"`
 }
 
+// ScriptSpec describes a single user-supplied script to execute on each
+// target node. Exactly one of Inline or ConfigMapRef should be set; if both
+// are set, ConfigMapRef wins.
+type ScriptSpec struct {
+	// Inline is the script body. When set, the controller materializes it
+	// into a ConfigMap named "nm-<nm-name>-script" in the runner namespace.
+	// +optional
+	Inline string `json:"inline,omitempty"`
+
+	// ConfigMapRef points at a pre-existing ConfigMap holding the script.
+	// +optional
+	ConfigMapRef *ScriptConfigMapRef `json:"configMapRef,omitempty"`
+
+	// Image is the runner container image. Defaults to "alpine:3.19".
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// TimeoutSeconds caps a single per-node script execution. Defaults to 600.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
+
+	// RunOnHost, when true (default), executes the script in the host mount
+	// namespace via nsenter, giving it access to host binaries and filesystem.
+	// When false, the script runs inside the runner Pod only.
+	// +optional
+	RunOnHost *bool `json:"runOnHost,omitempty"`
+
+	// Env is a list of name/value pairs passed to the script's environment.
+	// +optional
+	Env []EnvVar `json:"env,omitempty"`
+}
+
+// ScriptConfigMapRef references the ConfigMap entry that contains the script.
+type ScriptConfigMapRef struct {
+	Name string `json:"name"`
+	// Namespace defaults to the runner namespace when empty.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+	// Key defaults to "script.sh" when empty.
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
+// EnvVar is a simple name/value pair passed into the runner Pod.
+type EnvVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 // ActionSpec selects an action and configures its options.
 type ActionSpec struct {
-	// Type is the action kind. One of Cordon, Drain, Uncordon.
+	// Type is the action kind. One of Cordon, Drain, Uncordon, Script.
 	Type ActionType `json:"type"`
 
 	// DrainOptions tunes the Drain action. Ignored for other types.
@@ -56,15 +129,10 @@ type ActionSpec struct {
 
 // DrainOptions configures pod eviction behavior.
 type DrainOptions struct {
-	// GracePeriodSeconds for pod eviction. Defaults to the pod's terminationGracePeriodSeconds.
 	// +optional
 	GracePeriodSeconds *int64 `json:"gracePeriodSeconds,omitempty"`
-
-	// TimeoutSeconds is the wall-clock budget for the drain to complete on a node.
 	// +optional
 	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
-
-	// IgnoreDaemonSets skips DaemonSet-managed pods (recommended).
 	// +optional
 	IgnoreDaemonSets bool `json:"ignoreDaemonSets,omitempty"`
 }
@@ -72,28 +140,25 @@ type DrainOptions struct {
 // Strategy controls how many nodes can be in-flight at once.
 type Strategy struct {
 	// MaxUnavailable is the maximum number of nodes that can be in any
-	// non-terminal phase (cordoned/draining/etc.) at the same time. Defaults
-	// to 1 when unset or non-positive.
+	// non-terminal phase at the same time. Defaults to 1 when unset.
 	// +optional
+	// +kubebuilder:validation:Minimum=1
 	MaxUnavailable int `json:"maxUnavailable,omitempty"`
+
+	// AtOnce, when true, runs against every target node in parallel. Wins
+	// over MaxUnavailable.
+	// +optional
+	AtOnce bool `json:"atOnce,omitempty"`
 }
 
 // NodeMaintenanceStatus is the observed state of a maintenance run.
 type NodeMaintenanceStatus struct {
-	// Phase is the high-level phase of this maintenance run.
 	// +optional
 	Phase Phase `json:"phase,omitempty"`
-
-	// Nodes is the per-node progress table. The orchestrator only writes
-	// here; readers can rely on this being a stable view of the run.
 	// +optional
 	Nodes []NodeStatus `json:"nodes,omitempty"`
-
-	// StartTime is set when the run first transitions out of Pending.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
-
-	// CompletionTime is set when all nodes reach a terminal phase.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 }
@@ -106,11 +171,25 @@ type NodeStatus struct {
 	CompletedActions   []string     `json:"completedActions,omitempty"`
 	Message            string       `json:"message,omitempty"`
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+
+	// ScriptPodName is the name of the runner Pod that executed (or is
+	// executing) the Script action for this node. Useful for `kubectl nm logs`.
+	// +optional
+	ScriptPodName string `json:"scriptPodName,omitempty"`
+
+	// ScriptExitCode is the exit code of the script container once the
+	// Script action terminates. Set to a pointer so "unset" and "0" are
+	// distinguishable.
+	// +optional
+	ScriptExitCode *int32 `json:"scriptExitCode,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=nm
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Paused",type=boolean,JSONPath=`.spec.paused`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // NodeMaintenance is the Schema for the nodemaintenances API.
 type NodeMaintenance struct {

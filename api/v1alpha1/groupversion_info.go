@@ -1,7 +1,7 @@
-// Package v1alpha1 contains API Schema definitions for the fury.io v1alpha1 API group.
+// Package v1alpha1 contains API Schema definitions for the ko.io v1alpha1 API group.
 //
 // +kubebuilder:object:generate=true
-// +groupName=fury.io
+// +groupName=ko.io
 package v1alpha1
 
 import (
@@ -11,7 +11,7 @@ import (
 
 var (
 	// GroupVersion is the group/version used to register these objects.
-	GroupVersion = schema.GroupVersion{Group: "fury.io", Version: "v1alpha1"}
+	GroupVersion = schema.GroupVersion{Group: "ko.io", Version: "v1alpha1"}
 
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
 	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
