@@ -101,11 +101,11 @@ type ScriptSpec struct {
 }
 
 // ScriptConfigMapRef references the ConfigMap entry that contains the script.
+// The ConfigMap is always read from the controller's runner namespace — Pods
+// can only mount ConfigMaps from their own namespace, and the runner Pod is
+// created in that namespace.
 type ScriptConfigMapRef struct {
 	Name string `json:"name"`
-	// Namespace defaults to the runner namespace when empty.
-	// +optional
-	Namespace string `json:"namespace,omitempty"`
 	// Key defaults to "script.sh" when empty.
 	// +optional
 	Key string `json:"key,omitempty"`
@@ -161,6 +161,25 @@ type NodeMaintenanceStatus struct {
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// Summary rolls per-node phase counts up for at-a-glance progress in
+	// `kubectl get nm`. Recomputed on every reconcile from Nodes.
+	// +optional
+	Summary StatusSummary `json:"summary,omitempty"`
+}
+
+// StatusSummary holds per-phase node counts derived from Status.Nodes.
+type StatusSummary struct {
+	// +optional
+	Total int32 `json:"total,omitempty"`
+	// +optional
+	Pending int32 `json:"pending,omitempty"`
+	// +optional
+	InProgress int32 `json:"inProgress,omitempty"`
+	// +optional
+	Completed int32 `json:"completed,omitempty"`
+	// +optional
+	Failed int32 `json:"failed,omitempty"`
 }
 
 // NodeStatus tracks a single node through the action sequence.
@@ -189,7 +208,16 @@ type NodeStatus struct {
 // +kubebuilder:resource:scope=Cluster,shortName=nm
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Paused",type=boolean,JSONPath=`.spec.paused`
+// +kubebuilder:printcolumn:name="Targets",type=string,JSONPath=`.metadata.annotations.ko\.io/targets`
+// +kubebuilder:printcolumn:name="Done",type=integer,JSONPath=`.status.summary.completed`
+// +kubebuilder:printcolumn:name="Total",type=integer,JSONPath=`.status.summary.total`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:printcolumn:name="Pending",type=integer,JSONPath=`.status.summary.pending`,priority=1
+// +kubebuilder:printcolumn:name="InProgress",type=integer,JSONPath=`.status.summary.inProgress`,priority=1
+// +kubebuilder:printcolumn:name="Failed",type=integer,JSONPath=`.status.summary.failed`,priority=1
+// +kubebuilder:printcolumn:name="AllNodes",type=boolean,JSONPath=`.spec.allNodes`,priority=1
+// +kubebuilder:printcolumn:name="Selector",type=string,JSONPath=`.spec.nodeSelector`,priority=1
+// +kubebuilder:printcolumn:name="NodeNames",type=string,JSONPath=`.spec.nodeNames`,priority=1
 
 // NodeMaintenance is the Schema for the nodemaintenances API.
 type NodeMaintenance struct {

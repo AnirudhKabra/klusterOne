@@ -8,7 +8,7 @@ The unit of work is a single `NodeMaintenance` (`nm`) custom resource. You attac
 
 - **CRD**: `nodemaintenances.ko.io` (cluster-scoped, short name `nm`).
 - **Controller** (`ko-controller`): reconciles `NodeMaintenance` objects.
-- **CLI** (`kubectl-nm`, plugin-style): build, attach, run, status, logs.
+- **CLI** (`kubectl-nm`, plugin-style): create, attach, pause, run, status, logs.
 
 ## Quickstart
 
@@ -30,16 +30,44 @@ kubectl nm status patch-kernel
 kubectl nm logs patch-kernel --node ip-10-0-1-7 -f
 ```
 
+### Telling NMs apart at a glance
+
+`kubectl get nm` shows a `Targets` column populated from the `ko.io/targets`
+annotation that the CLI stamps at create time. Examples of what you'll see:
+
+```text
+NAME            PHASE       PAUSED  TARGETS                                   DONE  TOTAL  AGE
+patch-kernel    InProgress  false   selector:node-role.kubernetes.io/worker=  4     12     4m
+firmware-batch  Pending     true    nodes:node-7,node-8                       0     2      30s
+fix-dns         Completed   false   all                                       18    18     1h
+```
+
+The `Done`/`Total` columns are sourced from `status.summary`, which the
+controller recomputes on every reconcile from `status.nodes[]`.
+
+`kubectl get nm -o wide` adds per-phase counts (`Pending`, `InProgress`,
+`Failed`) and the raw spec targeting fields (`AllNodes`, `Selector`,
+`NodeNames`) for NMs authored as YAML directly (no annotation) or that
+have drifted from their original targeting since creation. For the
+per-node breakdown of a specific run use `kubectl nm status <name>`.
+
 ## CLI overview
 
 ```text
-kubectl nm create <name> [flags]   build & apply a NodeMaintenance
-kubectl nm attach <name> <script>  overwrite the script ConfigMap for an existing NM
-kubectl nm run    <name>           unpause an existing NM (flips spec.paused=false)
-kubectl nm status <name>           pretty-print phase + per-node table
+kubectl nm create <name> [flags]            build & apply a NodeMaintenance
+kubectl nm attach <name> <script>           overwrite the script ConfigMap for an existing NM
+kubectl nm pause  <name> [--reason TEXT]    pause an in-flight NM (flips spec.paused=true)
+kubectl nm run    <name>                    unpause an existing NM (flips spec.paused=false)
+kubectl nm status <name>                    pretty-print phase + per-node table
 kubectl nm logs   <name> [--node X] [-f]
-                                   stream runner-pod logs
+                                            stream runner-pod logs
 ```
+
+Both `pause` and `run` are idempotent — re-running them when the NM is
+already in the target state prints a friendly message and does not issue a
+patch. `pause --reason "..."` stamps the operator-supplied reason onto the
+NM as the `ko.io/pause-reason` annotation, which `kubectl nm status`
+surfaces; `pause` without `--reason` and `run` both clear that annotation.
 
 ### `kubectl nm create` flags
 
@@ -76,6 +104,27 @@ kubectl nm run rolling-patch
 
 `attach` only touches the backing ConfigMap; the NM object itself is unchanged, so this is a safe operation while the run is paused.
 
+### Halting an in-flight run
+
+```bash
+# Stop admitting new nodes and stop starting new actions. Whatever
+# action is currently mid-flight on a node finishes; nothing new starts.
+kubectl nm pause rolling-patch --reason "investigating node-7"
+
+# Inspect / fix / re-attach a new script as needed
+kubectl nm status rolling-patch
+kubectl nm attach rolling-patch ./fixed.sh
+
+# Resume from wherever each node left off
+kubectl nm run rolling-patch
+```
+
+`pause` is a fence between actions, not an interrupt mid-action: a Script
+Pod already running on a node will finish (success or fail); the pause
+prevents the *next* action (e.g. Uncordon) and prevents other Pending
+nodes from being admitted. To hard-stop a running script, additionally
+delete the runner Pod after pausing.
+
 ## Architecture
 
 ### Components & data flow
@@ -87,6 +136,7 @@ flowchart LR
     subgraph CLI["kubectl-nm (CLI)"]
         cli_create["create"]
         cli_attach["attach"]
+        cli_pause["pause"]
         cli_run["run"]
         cli_status["status"]
         cli_logs["logs"]
@@ -113,10 +163,11 @@ flowchart LR
     end
 
     user --> CLI
-    cli_create -->|create/update| nm
+    cli_create -->|create/update<br/>+ ko.io/targets annotation| nm
     cli_create -->|create/update| cm
     cli_attach -->|patch data| cm
-    cli_run -->|patch spec.paused=false| nm
+    cli_pause -->|patch spec.paused=true<br/>+ ko.io/pause-reason annotation| nm
+    cli_run -->|patch spec.paused=false<br/>clears pause-reason| nm
     cli_status -->|get| nm
     cli_logs -->|get logs| pods
 
@@ -168,7 +219,7 @@ sequenceDiagram
             A-->>O: nil (advance) or error (fail node)
             O->>O: Append action to CompletedActions<br/>or mark node Failed
         end
-        Note over O: rollup<br/>per-node phases → run phase
+        Note over O: rollup<br/>per-node phases → run phase<br/>+ status.summary counts
         O-->>R: requeue?
         R->>API: Status().Update(nm)
         R-->>API: Result{RequeueAfter: 10s}
@@ -224,8 +275,7 @@ spec:
     role: worker
   script:
     configMapRef:
-      name: rolling-patch-script
-      namespace: ko-system          # defaults to controller --runner-namespace
+      name: rolling-patch-script    # must live in the controller --runner-namespace
       key: script.sh                # defaults to "script.sh"
     # OR:
     # inline: |
@@ -248,6 +298,12 @@ spec:
 status:
   phase: InProgress                 # Pending | InProgress | Completed | Failed
   startTime: 2026-05-24T10:00:00Z
+  summary:                          # per-phase counts; surfaced as printer columns
+    total: 12
+    pending: 7
+    inProgress: 2
+    completed: 3
+    failed: 0
   nodes:
     - name: ip-10-0-1-7
       phase: InProgress
