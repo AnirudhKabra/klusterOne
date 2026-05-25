@@ -1,8 +1,14 @@
 # klusterOne (`ko-controller`)
 
-A Kubernetes-native operator + CLI for declaratively running **a user-supplied script on a set of nodes** under safety constraints (cordon, optional drain, max-unavailable budget, parallel "at-once" mode).
+A Kubernetes-native operator + CLI for declaratively running **a user-supplied
+script on a set of nodes** under safety constraints (cordon, optional drain,
+max-unavailable budget, parallel "at-once" mode).
 
-The unit of work is a single `NodeMaintenance` (`nm`) custom resource. You attach a shell script to it, choose where it runs (a label selector, an explicit node list, or every node), choose how aggressively it rolls out, and the controller takes care of the rest — cordon, run the script on the host via `nsenter`, capture exit code + logs into status, uncordon.
+The unit of work is a single `NodeMaintenance` (`nm`) custom resource. You
+attach a shell script to it, choose where it runs (a label selector, an
+explicit node list, or every node), choose how aggressively it rolls out, and
+the controller takes care of the rest — cordon, run the script on the host
+via `nsenter`, capture exit code + logs into status, uncordon.
 
 ## What you get
 
@@ -30,10 +36,11 @@ kubectl nm status patch-kernel
 kubectl nm logs patch-kernel --node ip-10-0-1-7 -f
 ```
 
-### Telling NMs apart at a glance
+## Telling NMs apart at a glance
 
 `kubectl get nm` shows a `Targets` column populated from the `ko.io/targets`
-annotation that the CLI stamps at create time. Examples of what you'll see:
+annotation that the CLI stamps at create time, plus `Done`/`Total` sourced
+from `status.summary`:
 
 ```text
 NAME            PHASE       PAUSED  TARGETS                                   DONE  TOTAL  AGE
@@ -42,303 +49,22 @@ firmware-batch  Pending     true    nodes:node-7,node-8                       0 
 fix-dns         Completed   false   all                                       18    18     1h
 ```
 
-The `Done`/`Total` columns are sourced from `status.summary`, which the
-controller recomputes on every reconcile from `status.nodes[]`.
-
 `kubectl get nm -o wide` adds per-phase counts (`Pending`, `InProgress`,
 `Failed`) and the raw spec targeting fields (`AllNodes`, `Selector`,
-`NodeNames`) for NMs authored as YAML directly (no annotation) or that
-have drifted from their original targeting since creation. For the
-per-node breakdown of a specific run use `kubectl nm status <name>`.
+`NodeNames`). For the per-node breakdown of a specific run use
+`kubectl nm status <name>`.
 
-## CLI overview
+## Documentation
 
-```text
-kubectl nm create <name> [flags]            build & apply a NodeMaintenance
-kubectl nm attach <name> <script>           overwrite the script ConfigMap for an existing NM
-kubectl nm pause  <name> [--reason TEXT]    pause an in-flight NM (flips spec.paused=true)
-kubectl nm run    <name>                    unpause an existing NM (flips spec.paused=false)
-kubectl nm status <name>                    pretty-print phase + per-node table
-kubectl nm logs   <name> [--node X] [-f]
-                                            stream runner-pod logs
-```
+Deep-dive references live in [`docs/`](./docs/README.md):
 
-Both `pause` and `run` are idempotent — re-running them when the NM is
-already in the target state prints a friendly message and does not issue a
-patch. `pause --reason "..."` stamps the operator-supplied reason onto the
-NM as the `ko.io/pause-reason` annotation, which `kubectl nm status`
-surfaces; `pause` without `--reason` and `run` both clear that annotation.
-
-### `kubectl nm create` flags
-
-| Flag                | Meaning                                                              |
-| ------------------- | -------------------------------------------------------------------- |
-| `--script PATH`     | Read script from a file (creates a ConfigMap in the runner namespace) |
-| `--inline STR`      | Use `STR` as the script body (mutually exclusive with `--script`)    |
-| `--all-nodes`       | Target every node in the cluster                                     |
-| `--at-once`         | Run on all targeted nodes in parallel (overrides `--max-unavailable`)|
-| `--max-unavailable N` | Maximum nodes in-flight (default 1)                                |
-| `--selector k=v,…`  | Label selector for target nodes                                      |
-| `--nodes a,b,c`     | Explicit node names                                                  |
-| `--cordon` / `--uncordon` | Wrap the script with Cordon/Uncordon actions (both default true) |
-| `--drain`           | Insert a Drain action between Cordon and Script                      |
-| `--timeout DURATION`| Per-node script execution timeout (default 10m)                      |
-| `--image IMG`       | Runner container image (default `alpine:3.19`)                       |
-| `--in-pod`          | Run the script inside the runner Pod (skip `nsenter` to host)        |
-| `--namespace NS`    | Runner namespace where the script ConfigMap is created (default `ko-system`) |
-| `--paused`          | Create paused; flip with `kubectl nm run`                            |
-| `--dry-run` / `-o`  | Print the generated NodeMaintenance YAML and exit                    |
-
-### Two-phase workflow (attach → run)
-
-```bash
-# Create the NM in paused mode (placeholder ConfigMap)
-kubectl nm create rolling-patch --inline ':' --selector role=worker --paused
-
-# Drop in (or replace) the real script later
-kubectl nm attach rolling-patch ./scripts/01.sh
-
-# Kick it off
-kubectl nm run rolling-patch
-```
-
-`attach` only touches the backing ConfigMap; the NM object itself is unchanged, so this is a safe operation while the run is paused.
-
-### Halting an in-flight run
-
-```bash
-# Stop admitting new nodes and stop starting new actions. Whatever
-# action is currently mid-flight on a node finishes; nothing new starts.
-kubectl nm pause rolling-patch --reason "investigating node-7"
-
-# Inspect / fix / re-attach a new script as needed
-kubectl nm status rolling-patch
-kubectl nm attach rolling-patch ./fixed.sh
-
-# Resume from wherever each node left off
-kubectl nm run rolling-patch
-```
-
-`pause` is a fence between actions, not an interrupt mid-action: a Script
-Pod already running on a node will finish (success or fail); the pause
-prevents the *next* action (e.g. Uncordon) and prevents other Pending
-nodes from being admitted. To hard-stop a running script, additionally
-delete the runner Pod after pausing.
-
-## Architecture
-
-### Components & data flow
-
-```mermaid
-flowchart LR
-    user(["User"])
-
-    subgraph CLI["kubectl-nm (CLI)"]
-        cli_create["create"]
-        cli_attach["attach"]
-        cli_pause["pause"]
-        cli_run["run"]
-        cli_status["status"]
-        cli_logs["logs"]
-    end
-
-    subgraph API["Kubernetes API Server"]
-        nm[("NodeMaintenance CR<br/>(spec + status)")]
-        cm[("ConfigMap<br/>nm-&lt;name&gt;-script")]
-        nodes[("Nodes")]
-        pods[("Runner Pods<br/>(ko-system ns)")]
-    end
-
-    subgraph CTRL["ko-controller (manager binary)"]
-        rec["NodeMaintenanceReconciler<br/>controller-runtime"]
-        orch["Orchestrator<br/>state machine + budget"]
-        reg["Action Registry"]
-
-        subgraph ACT["Actions"]
-            cordon["Cordon"]
-            drain["Drain"]
-            script["Script"]
-            uncordon["Uncordon"]
-        end
-    end
-
-    user --> CLI
-    cli_create -->|create/update<br/>+ ko.io/targets annotation| nm
-    cli_create -->|create/update| cm
-    cli_attach -->|patch data| cm
-    cli_pause -->|patch spec.paused=true<br/>+ ko.io/pause-reason annotation| nm
-    cli_run -->|patch spec.paused=false<br/>clears pause-reason| nm
-    cli_status -->|get| nm
-    cli_logs -->|get logs| pods
-
-    nm -. watch .-> rec
-    rec --> orch
-    orch --> reg
-    reg --> cordon & drain & script & uncordon
-
-    cordon -->|patch unschedulable=true| nodes
-    uncordon -->|patch unschedulable=false| nodes
-    drain -->|policyv1 Eviction| pods
-    script -->|create pinned Pod| pods
-    script -. nsenter into PID 1 .-> nodes
-    rec -->|Status.Update| nm
-```
-
-The system has three independently-evolving pieces:
-
-- **`kubectl-nm` CLI** — does plain API-server writes (`NodeMaintenance` CRs, the script ConfigMap, paused-flag patches). It never talks to the controller directly; it only mutates the desired state.
-- **`ko-controller`** — a controller-runtime manager watching `NodeMaintenance`. The reconciler is intentionally thin; it delegates one **Step** to the orchestrator per reconcile.
-- **Action Registry** — pluggable units (`Cordon`, `Drain`, `Uncordon`, `Script`) keyed by `ActionType`. The orchestrator never knows what an action *does* — only that `Execute` either succeeds or fails for one node.
-
-### What happens in one reconcile
-
-```mermaid
-sequenceDiagram
-    participant API as API Server
-    participant R as Reconciler<br/>(controller-runtime)
-    participant O as Orchestrator
-    participant A as Action (e.g. Script)
-    participant K as Cluster<br/>(Node / Pod)
-
-    API->>R: Watch event on NodeMaintenance
-    R->>API: Get nm
-    alt nm terminal (Completed/Failed)
-        R-->>API: nothing to do
-    else nm paused
-        R-->>API: Result{RequeueAfter: 15s}
-    else
-        R->>O: Step(ctx, nm)
-        Note over O: initStatus<br/>(first reconcile only)
-        O->>API: List nodes (selector/all)
-        Note over O: admit Pending → InProgress<br/>(respects maxUnavailable / atOnce)
-        loop for each InProgress node
-            O->>O: idx = len(CompletedActions)
-            O->>API: Get Node
-            O->>A: Execute(ctx, nm, node, ns, spec)
-            A->>K: Patch / Evict / Create Pod
-            A-->>O: nil (advance) or error (fail node)
-            O->>O: Append action to CompletedActions<br/>or mark node Failed
-        end
-        Note over O: rollup<br/>per-node phases → run phase<br/>+ status.summary counts
-        O-->>R: requeue?
-        R->>API: Status().Update(nm)
-        R-->>API: Result{RequeueAfter: 10s}
-    end
-```
-
-Two important invariants come out of this loop:
-
-- **One action per node per Step.** `advanceNode` runs exactly one action then returns, so even a `[Cordon, Drain, Script, Uncordon]` chain takes four reconciles per node. This keeps the status update small and lets the budget rebalance between steps.
-- **Actions must be idempotent.** Crashes, conflict retries, or controller restarts will re-Execute a half-finished action. That's why every action checks "am I already in the desired state?" before mutating (`Cordon` looks at `node.Spec.Unschedulable`, `Script` `Get`s the pod by deterministic name and reuses it, `Drain` re-lists and re-evicts).
-
-### Per-node phase lifecycle
-
-```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> Pending: initStatus seeds<br/>status.nodes[]
-    Pending --> InProgress: admit()<br/>budget available
-    InProgress --> InProgress: advanceNode()<br/>append CompletedAction
-    InProgress --> Completed: len(CompletedActions)<br/>== len(plan)
-    InProgress --> Failed: action returned error
-    Completed --> [*]
-    Failed --> [*]
-```
-
-The run-level `status.phase` is just a `rollup` of these per-node phases: `InProgress` while any node is non-terminal, `Failed` if any node ended `Failed`, otherwise `Completed`. A `Failed` node intentionally **stops mid-chain** — if `Drain` fails the `Script` and `Uncordon` after it are skipped, so the cluster operator sees the cordon still in place as a "do not auto-recover" signal.
-
-## How the Script action works
-
-For each in-flight node, the controller materializes a privileged runner Pod with:
-
-- `spec.nodeName: <target>` (bypasses the scheduler — important: the node is already cordoned)
-- `tolerations: [{operator: Exists}]` (so it lands on tainted/cordoned nodes)
-- `hostPID`, `hostNetwork`, `hostIPC` (default `runOnHost: true`)
-- An init container that copies the script from the ConfigMap onto a hostPath dir
-- A main container that runs `nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh /var/lib/ko-controller/scripts/<id>.sh`
-
-The action blocks until the Pod reaches Succeeded or Failed. On failure, the last log chunk is captured into `status.nodes[*].message` and the per-node exit code into `status.nodes[*].scriptExitCode`. Failed nodes stay cordoned (a follow-up Uncordon action is skipped).
-
-Pass `runOnHost: false` (CLI: `--in-pod`) to keep execution inside the Pod's own namespaces — useful for "API-side" scripts that only need a kubeconfig.
-
-## Spec reference (abridged)
-
-```yaml
-apiVersion: ko.io/v1alpha1
-kind: NodeMaintenance
-metadata:
-  name: rolling-patch
-spec:
-  paused: false
-  allNodes: false                   # if true, ignores nodeSelector/nodeNames
-  nodeSelector:                     # OR nodeNames, OR allNodes
-    role: worker
-  script:
-    configMapRef:
-      name: rolling-patch-script    # must live in the controller --runner-namespace
-      key: script.sh                # defaults to "script.sh"
-    # OR:
-    # inline: |
-    #   #!/bin/sh
-    #   ...
-    image: alpine:3.19              # default
-    timeoutSeconds: 600
-    runOnHost: true                 # default — nsenter into PID 1
-    env:
-      - { name: GREETING, value: hello }
-  strategy:
-    maxUnavailable: 2               # default 1
-    atOnce: false                   # if true, overrides maxUnavailable
-  actions:                          # defaults to [Cordon, Script, Uncordon]
-    - type: Cordon
-    - type: Drain
-      drainOptions: { ignoreDaemonSets: true, timeoutSeconds: 300 }
-    - type: Script
-    - type: Uncordon
-status:
-  phase: InProgress                 # Pending | InProgress | Completed | Failed
-  startTime: 2026-05-24T10:00:00Z
-  summary:                          # per-phase counts; surfaced as printer columns
-    total: 12
-    pending: 7
-    inProgress: 2
-    completed: 3
-    failed: 0
-  nodes:
-    - name: ip-10-0-1-7
-      phase: InProgress
-      currentAction: Script
-      completedActions: [Cordon]
-      scriptPodName: nm-rolling-patch-ip-10-0-1-7
-      scriptExitCode: 0
-      lastTransitionTime: 2026-05-24T10:00:42Z
-```
-
-## Updating the CRD after a spec change
-
-When you add or change a field in `api/v1alpha1/nodemaintenance_types.go`, two artifacts have to be regenerated in lockstep with the Go types:
-
-- `api/v1alpha1/zz_generated.deepcopy.go` — `DeepCopy*` methods the controller needs to compile.
-- `config/crd/ko.io_nodemaintenances.yaml` — the cluster-side schema (the API server silently drops fields not declared here).
-
-Both are produced from kubebuilder markers (`+kubebuilder:validation:*`, `+kubebuilder:printcolumn:*`, etc.) on the Go types via `controller-gen`.
-
-```bash
-# 1. Edit api/v1alpha1/nodemaintenance_types.go — add the field and any markers
-#    (e.g. +kubebuilder:validation:Minimum=1, +kubebuilder:validation:Enum=...).
-
-# 2. Regenerate the deepcopy methods.
-make generate
-
-# 3. Regenerate the CRD schema.
-make manifests
-
-# 4. Apply the new CRD to the cluster and rebuild the controller / CLI.
-make install-crd
-make build install-cli
-```
-
-`controller-gen` is auto-downloaded into `./bin/controller-gen` on first invocation; override the pinned version with `make manifests CONTROLLER_GEN_VERSION=v0.17.0`.
+| Topic                                          | Page                                             |
+|------------------------------------------------|--------------------------------------------------|
+| Components & data flow (CLI ↔ controller ↔ CRD)| [docs/architecture.md](./docs/architecture.md)   |
+| Full `kubectl-nm` reference                    | [docs/cli.md](./docs/cli.md)                     |
+| Reconcile lifecycle (3-node walkthrough)       | [docs/reconcile-flow.md](./docs/reconcile-flow.md) |
+| How Script runs on the host                    | [docs/script-action.md](./docs/script-action.md) |
+| Full CRD spec + codegen workflow               | [docs/crd-reference.md](./docs/crd-reference.md) |
 
 ## Layout
 
@@ -351,6 +77,7 @@ make build install-cli
 ├── config/
 │   ├── crd/                      # CRD manifest
 │   └── samples/                  # Example NodeMaintenance objects
+├── docs/                         # Architecture, CLI, reconcile flow, ...
 ├── internal/
 │   ├── actions/                  # Cordon, Drain, Uncordon, Script
 │   ├── cli/                      # kubectl-nm subcommands
