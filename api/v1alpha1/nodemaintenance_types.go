@@ -1,6 +1,9 @@
 package v1alpha1
 
 import (
+	"sort"
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -33,13 +36,21 @@ type NodeMaintenanceSpec struct {
 	//   kubectl nm create ... --paused
 	//   kubectl nm attach <name> ./script.sh
 	//   kubectl nm run <name>
+	//
+	// No omitempty + a CRD-level default ensure `paused: false` is always
+	// present in the stored spec, so the "Paused" printer column never
+	// renders blank — even when applied YAML omits the field.
 	// +optional
-	Paused bool `json:"paused,omitempty"`
+	// +kubebuilder:default=false
+	Paused bool `json:"paused"`
 
 	// AllNodes, when true, targets every node in the cluster and ignores
 	// NodeSelector / NodeNames.
+	//
+	// Same defaulting story as Paused.
 	// +optional
-	AllNodes bool `json:"allNodes,omitempty"`
+	// +kubebuilder:default=false
+	AllNodes bool `json:"allNodes"`
 
 	// NodeSelector selects target nodes by labels. Ignored when NodeNames is
 	// set or AllNodes is true.
@@ -166,20 +177,33 @@ type NodeMaintenanceStatus struct {
 	// `kubectl get nm`. Recomputed on every reconcile from Nodes.
 	// +optional
 	Summary StatusSummary `json:"summary,omitempty"`
+
+	// Targets is a one-line human-readable summary of which nodes this run
+	// is targeting ("all", "selector:k=v", "nodes:a,b,c"). The controller
+	// stamps this during the first reconcile based on Spec.{AllNodes,
+	// NodeNames, NodeSelector}, so the "Targets" printer column populates
+	// regardless of whether the NM was created via the CLI or kubectl apply.
+	// +optional
+	Targets string `json:"targets,omitempty"`
 }
 
 // StatusSummary holds per-phase node counts derived from Status.Nodes.
+//
+// None of these fields use omitempty: we want zero counts to serialize as 0,
+// not be absent, so the corresponding printer columns ("Total", "Pending",
+// "InProgress", "Done", "Failed") render as "0" instead of empty in
+// `kubectl get nm`.
 type StatusSummary struct {
 	// +optional
-	Total int32 `json:"total,omitempty"`
+	Total int32 `json:"total"`
 	// +optional
-	Pending int32 `json:"pending,omitempty"`
+	Pending int32 `json:"pending"`
 	// +optional
-	InProgress int32 `json:"inProgress,omitempty"`
+	InProgress int32 `json:"inProgress"`
 	// +optional
-	Completed int32 `json:"completed,omitempty"`
+	Completed int32 `json:"completed"`
 	// +optional
-	Failed int32 `json:"failed,omitempty"`
+	Failed int32 `json:"failed"`
 }
 
 // NodeStatus tracks a single node through the action sequence.
@@ -208,16 +232,19 @@ type NodeStatus struct {
 // +kubebuilder:resource:scope=Cluster,shortName=nm
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Paused",type=boolean,JSONPath=`.spec.paused`
-// +kubebuilder:printcolumn:name="Targets",type=string,JSONPath=`.metadata.annotations.ko\.io/targets`
+// +kubebuilder:printcolumn:name="Targets",type=string,JSONPath=`.status.targets`
 // +kubebuilder:printcolumn:name="Done",type=integer,JSONPath=`.status.summary.completed`
 // +kubebuilder:printcolumn:name="Total",type=integer,JSONPath=`.status.summary.total`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="Pending",type=integer,JSONPath=`.status.summary.pending`,priority=1
 // +kubebuilder:printcolumn:name="InProgress",type=integer,JSONPath=`.status.summary.inProgress`,priority=1
 // +kubebuilder:printcolumn:name="Failed",type=integer,JSONPath=`.status.summary.failed`,priority=1
-// +kubebuilder:printcolumn:name="AllNodes",type=boolean,JSONPath=`.spec.allNodes`,priority=1
-// +kubebuilder:printcolumn:name="Selector",type=string,JSONPath=`.spec.nodeSelector`,priority=1
-// +kubebuilder:printcolumn:name="NodeNames",type=string,JSONPath=`.spec.nodeNames`,priority=1
+//
+// AllNodes/Selector/NodeNames spec fields are intentionally NOT exposed as
+// printer columns: the "Targets" column above already renders all three
+// modes in one place ("all" / "selector:k=v" / "nodes:a,b,c"). Having
+// separate columns means two of the three are always blank, which is noisy
+// in `kubectl get nm -o wide`.
 
 // NodeMaintenance is the Schema for the nodemaintenances API.
 type NodeMaintenance struct {
@@ -235,4 +262,38 @@ type NodeMaintenanceList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []NodeMaintenance `json:"items"`
+}
+
+// SummarizeTargets renders the spec's target selection as a short string
+// suitable for the "Targets" printer column. AllNodes wins over NodeNames
+// wins over NodeSelector — matching how the orchestrator resolves them.
+// Returns "" when no target field is set; truncated at maxTargetsLen to
+// keep the column narrow.
+func (s *NodeMaintenanceSpec) SummarizeTargets() string {
+	const maxLen = 60
+	switch {
+	case s.AllNodes:
+		return "all"
+	case len(s.NodeNames) > 0:
+		return truncateForColumn("nodes:"+strings.Join(s.NodeNames, ","), maxLen)
+	case len(s.NodeSelector) > 0:
+		keys := make([]string, 0, len(s.NodeSelector))
+		for k := range s.NodeSelector {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, k+"="+s.NodeSelector[k])
+		}
+		return truncateForColumn("selector:"+strings.Join(parts, ","), maxLen)
+	}
+	return ""
+}
+
+func truncateForColumn(str string, n int) string {
+	if len(str) <= n {
+		return str
+	}
+	return str[:n-1] + "…"
 }

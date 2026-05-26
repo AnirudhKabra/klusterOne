@@ -12,6 +12,7 @@ top-level [README](../README.md). This folder is the deep-dive index.
 | Reconcile lifecycle deep dive (3-node walkthrough) | [reconcile-flow.md](./reconcile-flow.md) |
 | How the Script action runs on the host         | [script-action.md](./script-action.md) |
 | Full CRD spec + codegen workflow               | [crd-reference.md](./crd-reference.md) |
+| Hands-on `kubectl` cheat sheet + minikube loop | [exploring.md](./exploring.md) |
 
 ## Suggested reading order
 
@@ -25,3 +26,6 @@ top-level [README](../README.md). This folder is the deep-dive index.
 4. **[script-action.md](./script-action.md)** and
    **[crd-reference.md](./crd-reference.md)** — pick up as needed when
    writing scripts or evolving the CRD spec.
+5. **[exploring.md](./exploring.md)** — `kubectl` / `kubectl-nm` / minikube
+   cheat sheet for verifying the install, running a sample, and debugging
+   live runs. Day-to-day operations reference rather than design doc.

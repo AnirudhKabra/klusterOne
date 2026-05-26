@@ -24,22 +24,40 @@ make install-crd
 make build && ./bin/ko-controller --runner-namespace ko-system
 # (in another shell)
 make install-cli   # places kubectl-nm on $PATH (use DEST=... to relocate)
+```
 
-# 2. Run an ad-hoc script on every worker, max 2 unavailable at a time
+For an in-cluster deploy with a dedicated ServiceAccount and least-privilege
+RBAC (no `delete` on `nodes`, runner Pods/ConfigMaps confined to `ko-system`):
+
+```bash
+make docker IMAGE=ghcr.io/kluster-one/ko-controller:v0.1.0
+make deploy IMAGE=ghcr.io/kluster-one/ko-controller:v0.1.0
+# tear down: make undeploy
+```
+
+See [`config/rbac/cluster_role.yaml`](./config/rbac/cluster_role.yaml) and
+[`config/rbac/role.yaml`](./config/rbac/role.yaml) for the exact permissions
+the operator runs with.
+
+Once the controller is up (either way), drive it from the CLI:
+
+```bash
+# Run an ad-hoc script on every worker, max 2 unavailable at a time
 kubectl nm create patch-kernel \
   --script ./scripts/01.sh \
   --selector node-role.kubernetes.io/worker= \
   --max-unavailable 2
 
-# 3. Watch progress
+# Watch progress
 kubectl nm status patch-kernel
 kubectl nm logs patch-kernel --node ip-10-0-1-7 -f
 ```
 
 ## Telling NMs apart at a glance
 
-`kubectl get nm` shows a `Targets` column populated from the `ko.io/targets`
-annotation that the CLI stamps at create time, plus `Done`/`Total` sourced
+`kubectl get nm` shows a `Targets` column populated by the controller into
+`.status.targets` during the first reconcile (so it works for NMs created
+via `kubectl apply` as well as via the CLI), plus `Done`/`Total` sourced
 from `status.summary`:
 
 ```text
@@ -50,8 +68,7 @@ fix-dns         Completed   false   all                                       18
 ```
 
 `kubectl get nm -o wide` adds per-phase counts (`Pending`, `InProgress`,
-`Failed`) and the raw spec targeting fields (`AllNodes`, `Selector`,
-`NodeNames`). For the per-node breakdown of a specific run use
+`Failed`). For the per-node breakdown of a specific run use
 `kubectl nm status <name>`.
 
 ## Documentation
@@ -76,7 +93,10 @@ Deep-dive references live in [`docs/`](./docs/README.md):
 │   └── kubectl-nm/               # kubectl plugin binary
 ├── config/
 │   ├── crd/                      # CRD manifest
-│   └── samples/                  # Example NodeMaintenance objects
+│   ├── manager/                  # Namespace + controller Deployment
+│   ├── rbac/                     # ServiceAccount + (Cluster)Role(Binding)s
+│   ├── samples/                  # Example NodeMaintenance objects
+│   └── kustomization.yaml        # `kubectl apply -k config/` entry point
 ├── docs/                         # Architecture, CLI, reconcile flow, ...
 ├── internal/
 │   ├── actions/                  # Cordon, Drain, Uncordon, Script

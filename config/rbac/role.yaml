@@ -1,0 +1,45 @@
+# Namespaced permissions for ko-controller-manager, confined to the runner
+# namespace (ko-system, matching the operator's --runner-namespace default).
+#
+# Everything destructive that the Script action needs (creating per-node runner
+# Pods, deleting them when done, reading their logs, owning ConfigMaps that
+# carry the user's script) is bound here. The blast radius is exactly one
+# namespace — even a buggy reconcile cannot create or delete a Pod or
+# ConfigMap anywhere else.
+#
+# If you change the operator's --runner-namespace flag, redeploy this Role
+# (and its binding) into the new namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ko-controller-manager-runner-role
+  namespace: ko-system
+  labels:
+    app.kubernetes.io/name: klusterone
+    app.kubernetes.io/component: ko-controller
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - create
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete

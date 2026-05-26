@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ko-controller-manager
+  namespace: ko-system
+  labels:
+    app.kubernetes.io/name: klusterone
+    app.kubernetes.io/component: ko-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: klusterone
+      app.kubernetes.io/component: ko-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: klusterone
+        app.kubernetes.io/component: ko-controller
+    spec:
+      serviceAccountName: ko-controller-manager
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: ko-controller:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+            - --runner-namespace=ko-system
+            - --runner-image=alpine:3.19
+            - --requeue-interval=10s
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ko-controller-manager-rolebinding
+  labels:
+    app.kubernetes.io/name: klusterone
+    app.kubernetes.io/component: ko-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ko-controller-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: ko-controller-manager
+    namespace: ko-system

@@ -41,6 +41,7 @@ spec:
 status:
   phase: InProgress                 # Pending | InProgress | Completed | Failed
   startTime: 2026-05-24T10:00:00Z
+  targets: "selector:node-role.kubernetes.io/worker="   # one-line spec summary; surfaces as the Targets printer column
   summary:                          # per-phase counts; surfaced as printer columns
     total: 12
     pending: 7

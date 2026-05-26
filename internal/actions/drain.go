@@ -3,6 +3,7 @@ package actions
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -12,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
 
-	furyv1alpha1 "github.com/fury/fury-controller/api/v1alpha1"
+	kov1alpha1 "github.com/AnirudhKabra/klusterOne/api/v1alpha1"
 )
 
 // mirrorPodAnnotation marks a static pod created by the kubelet from a manifest
@@ -41,9 +42,15 @@ type Drain struct {
 	PollInterval time.Duration
 }
 
-func (d *Drain) Name() string { return string(furyv1alpha1.ActionDrain) }
+func (d *Drain) Name() string { return string(kov1alpha1.ActionDrain) }
 
-func (d *Drain) Execute(ctx context.Context, node *corev1.Node, spec furyv1alpha1.ActionSpec) error {
+func (d *Drain) Execute(
+	ctx context.Context,
+	_ *kov1alpha1.NodeMaintenance,
+	node *corev1.Node,
+	_ *kov1alpha1.NodeStatus,
+	spec kov1alpha1.ActionSpec,
+) error {
 	opts := drainOptionsOrDefault(spec.DrainOptions)
 	timeout := d.DefaultTimeout
 	if opts.TimeoutSeconds != nil {
@@ -58,28 +65,63 @@ func (d *Drain) Execute(ctx context.Context, node *corev1.Node, spec furyv1alpha
 		poll = 5 * time.Second
 	}
 
-	pods, err := d.podsToEvict(ctx, node.Name, opts)
-	if err != nil {
-		return fmt.Errorf("list pods on %s: %w", node.Name, err)
-	}
-
-	for i := range pods {
-		if err := d.evict(ctx, &pods[i], opts); err != nil {
-			return fmt.Errorf("evict %s/%s: %w", pods[i].Namespace, pods[i].Name, err)
-		}
-	}
-
 	deadline := time.Now().Add(timeout)
+	// Carry context across iterations so the timeout error can blame the
+	// most recent cause (PDB-blocked pods or a transient list failure)
+	// rather than leaving the operator guessing.
+	var (
+		lastBlocked []string
+		lastListErr error
+		lastCount   int
+	)
+
 	for {
-		remaining, err := d.podsToEvict(ctx, node.Name, opts)
-		if err != nil {
-			return err
+		remaining, listErr := d.podsToEvict(ctx, node.Name, opts)
+		switch {
+		case listErr == nil:
+			lastListErr = nil
+			lastCount = len(remaining)
+			if len(remaining) == 0 {
+				return nil
+			}
+		case isTransientAPIErr(listErr):
+			// Apiserver hiccup. The orchestrator does not retry actions
+			// (see orchestrator.advanceNode → failNode), so a transient
+			// 503/504 on list must not kill an otherwise drainable node;
+			// remember the error so the timeout message can surface it.
+			lastListErr = listErr
+			remaining = nil
+		default:
+			return fmt.Errorf("list pods on %s: %w", node.Name, listErr)
 		}
-		if len(remaining) == 0 {
-			return nil
+
+		// Only (re-)evict pods that aren't already shutting down. A successful
+		// eviction sets DeletionTimestamp; the pod then lingers on the node
+		// until the kubelet finishes its grace period, and re-evicting it in
+		// the meantime is just API-server spam. Pods with no DeletionTimestamp
+		// are either fresh or were PDB-blocked (429 without delete), so they
+		// get retried on this pass.
+		var blocked []string
+		for i := range remaining {
+			if remaining[i].DeletionTimestamp != nil {
+				continue
+			}
+			isBlocked, err := d.evict(ctx, &remaining[i], opts)
+			if err != nil {
+				return fmt.Errorf("evict %s/%s: %w", remaining[i].Namespace, remaining[i].Name, err)
+			}
+			if isBlocked {
+				blocked = append(blocked, fmt.Sprintf("%s/%s", remaining[i].Namespace, remaining[i].Name))
+			}
 		}
+		if listErr == nil {
+			// Only refresh lastBlocked when we actually saw the pod list this
+			// pass; otherwise the report would falsely look empty.
+			lastBlocked = blocked
+		}
+
 		if time.Now().After(deadline) {
-			return fmt.Errorf("drain timed out on %s: %d pods remaining", node.Name, len(remaining))
+			return drainTimeoutError(node.Name, lastCount, lastBlocked, lastListErr)
 		}
 		select {
 		case <-ctx.Done():
@@ -89,7 +131,29 @@ func (d *Drain) Execute(ctx context.Context, node *corev1.Node, spec furyv1alpha
 	}
 }
 
-func (d *Drain) podsToEvict(ctx context.Context, nodeName string, opts furyv1alpha1.DrainOptions) ([]corev1.Pod, error) {
+func drainTimeoutError(node string, remaining int, blocked []string, listErr error) error {
+	if listErr != nil {
+		return fmt.Errorf("drain timed out on %s: last pod list failed transiently: %w", node, listErr)
+	}
+	if len(blocked) > 0 {
+		return fmt.Errorf("drain timed out on %s: %d pods remaining (blocked by PDB: %s)",
+			node, remaining, strings.Join(blocked, ", "))
+	}
+	return fmt.Errorf("drain timed out on %s: %d pods remaining", node, remaining)
+}
+
+// isTransientAPIErr reports whether err is a class of apiserver failure that
+// is expected to clear on its own (overload, leader election, brief network
+// blip). Used to keep the drain loop alive across short-lived hiccups instead
+// of failing the whole node.
+func isTransientAPIErr(err error) bool {
+	return apierrors.IsServerTimeout(err) ||
+		apierrors.IsServiceUnavailable(err) ||
+		apierrors.IsTimeout(err) ||
+		apierrors.IsTooManyRequests(err)
+}
+
+func (d *Drain) podsToEvict(ctx context.Context, nodeName string, opts kov1alpha1.DrainOptions) ([]corev1.Pod, error) {
 	sel := fields.OneTermEqualSelector("spec.nodeName", nodeName).String()
 	list, err := d.Client.CoreV1().Pods(metav1.NamespaceAll).List(
 		ctx, metav1.ListOptions{FieldSelector: sel},
@@ -114,7 +178,13 @@ func (d *Drain) podsToEvict(ctx context.Context, nodeName string, opts furyv1alp
 	return out, nil
 }
 
-func (d *Drain) evict(ctx context.Context, p *corev1.Pod, opts furyv1alpha1.DrainOptions) error {
+// evict attempts a single eviction against the API server. Returns
+// (blocked, err) where blocked=true means a PodDisruptionBudget rejected the
+// request (HTTP 429 from the Eviction API). Transient apiserver failures
+// (503/504/timeout) are swallowed silently and rely on the outer loop to
+// retry on the next pass — this matters because the orchestrator marks the
+// node Failed on any returned error.
+func (d *Drain) evict(ctx context.Context, p *corev1.Pod, opts kov1alpha1.DrainOptions) (blocked bool, err error) {
 	delOpts := &metav1.DeleteOptions{}
 	if opts.GracePeriodSeconds != nil {
 		grace := *opts.GracePeriodSeconds
@@ -124,23 +194,22 @@ func (d *Drain) evict(ctx context.Context, p *corev1.Pod, opts furyv1alpha1.Drai
 		ObjectMeta:    metav1.ObjectMeta{Name: p.Name, Namespace: p.Namespace},
 		DeleteOptions: delOpts,
 	}
-	err := d.Client.PolicyV1().Evictions(p.Namespace).Evict(ctx, eviction)
+	err = d.Client.PolicyV1().Evictions(p.Namespace).Evict(ctx, eviction)
 	switch {
-	case err == nil:
-		return nil
-	case apierrors.IsNotFound(err):
-		return nil
+	case err == nil, apierrors.IsNotFound(err):
+		return false, nil
 	case apierrors.IsTooManyRequests(err):
-		// PDB blocked us; the wait loop will retry the eviction next pass.
-		return nil
+		return true, nil
+	case apierrors.IsServerTimeout(err), apierrors.IsServiceUnavailable(err), apierrors.IsTimeout(err):
+		return false, nil
 	default:
-		return err
+		return false, err
 	}
 }
 
-func drainOptionsOrDefault(in *furyv1alpha1.DrainOptions) furyv1alpha1.DrainOptions {
+func drainOptionsOrDefault(in *kov1alpha1.DrainOptions) kov1alpha1.DrainOptions {
 	if in == nil {
-		return furyv1alpha1.DrainOptions{IgnoreDaemonSets: true}
+		return kov1alpha1.DrainOptions{IgnoreDaemonSets: true}
 	}
 	return *in
 }

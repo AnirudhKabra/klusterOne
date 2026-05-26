@@ -1,0 +1,16 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ko-controller-manager-runner-rolebinding
+  namespace: ko-system
+  labels:
+    app.kubernetes.io/name: klusterone
+    app.kubernetes.io/component: ko-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ko-controller-manager-runner-role
+subjects:
+  - kind: ServiceAccount
+    name: ko-controller-manager
+    namespace: ko-system

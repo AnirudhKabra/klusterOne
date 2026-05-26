@@ -1,0 +1,74 @@
+# Cluster-scoped permissions for ko-controller-manager.
+#
+# This ClusterRole intentionally grants the *minimum* the controller needs at
+# cluster scope:
+#   - full lifecycle on the cluster-scoped NodeMaintenance CR,
+#   - mutation of Node objects ONLY via patch/update (cordon/uncordon toggles
+#     spec.unschedulable + taints). NO create/delete on nodes.
+#   - read-only visibility into pods anywhere (Drain enumerates pods on a node),
+#   - eviction subresource so Drain goes through the PDB-aware path,
+#     never via Pod.Delete.
+#
+# Anything namespace-scoped (the script runner Pod, its logs, and its
+# ConfigMap) lives in config/rbac/role.yaml, scoped to ko-system only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ko-controller-manager-role
+  labels:
+    app.kubernetes.io/name: klusterone
+    app.kubernetes.io/component: ko-controller
+rules:
+  - apiGroups:
+      - ko.io
+    resources:
+      - nodemaintenances
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ko.io
+    resources:
+      - nodemaintenances/status
+    verbs:
+      - get
+      - update
+      - patch
+
+  # Cordon / Uncordon: patch spec.unschedulable + taints. Read for orchestrator
+  # pre-flight (Get before each action). Explicitly NO create/delete.
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+      - update
+
+  # Drain: enumerate pods scheduled on a node so we know what to evict and
+  # when the node is empty.
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+
+  # Drain: PDB-aware eviction. Note this is the eviction subresource, not
+  # pods.delete — eviction respects PodDisruptionBudgets.
+  - apiGroups:
+      - ""
+    resources:
+      - pods/eviction
+    verbs:
+      - create

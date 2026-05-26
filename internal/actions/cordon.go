@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
-	furyv1alpha1 "github.com/fury/fury-controller/api/v1alpha1"
+	kov1alpha1 "github.com/AnirudhKabra/klusterOne/api/v1alpha1"
 )
 
 // Cordon marks a node Unschedulable via a strategic-merge patch.
@@ -16,9 +16,15 @@ type Cordon struct {
 	Client kubernetes.Interface
 }
 
-func (c *Cordon) Name() string { return string(furyv1alpha1.ActionCordon) }
+func (c *Cordon) Name() string { return string(kov1alpha1.ActionCordon) }
 
-func (c *Cordon) Execute(ctx context.Context, node *corev1.Node, _ furyv1alpha1.ActionSpec) error {
+func (c *Cordon) Execute(
+	ctx context.Context,
+	_ *kov1alpha1.NodeMaintenance,
+	node *corev1.Node,
+	_ *kov1alpha1.NodeStatus,
+	_ kov1alpha1.ActionSpec,
+) error {
 	if node.Spec.Unschedulable {
 		return nil
 	}

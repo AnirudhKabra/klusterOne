@@ -42,7 +42,7 @@ flowchart LR
     end
 
     user --> CLI
-    cli_create -->|create/update<br/>+ ko.io/targets annotation| nm
+    cli_create -->|create/update| nm
     cli_create -->|create/update| cm
     cli_attach -->|patch data| cm
     cli_pause -->|patch spec.paused=true<br/>+ ko.io/pause-reason annotation| nm

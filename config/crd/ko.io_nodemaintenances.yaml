@@ -1,0 +1,305 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: nodemaintenances.ko.io
+spec:
+  group: ko.io
+  names:
+    kind: NodeMaintenance
+    listKind: NodeMaintenanceList
+    plural: nodemaintenances
+    shortNames:
+    - nm
+    singular: nodemaintenance
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.paused
+      name: Paused
+      type: boolean
+    - jsonPath: .status.targets
+      name: Targets
+      type: string
+    - jsonPath: .status.summary.completed
+      name: Done
+      type: integer
+    - jsonPath: .status.summary.total
+      name: Total
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.summary.pending
+      name: Pending
+      priority: 1
+      type: integer
+    - jsonPath: .status.summary.inProgress
+      name: InProgress
+      priority: 1
+      type: integer
+    - jsonPath: .status.summary.failed
+      name: Failed
+      priority: 1
+      type: integer
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: NodeMaintenance is the Schema for the nodemaintenances API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: NodeMaintenanceSpec is the desired state of a node maintenance
+              run.
+            properties:
+              actions:
+                description: |-
+                  Actions is the ordered list of actions executed against every target
+                  node. When empty and Script is set, defaults to [Cordon, Script, Uncordon].
+                items:
+                  description: ActionSpec selects an action and configures its options.
+                  properties:
+                    drainOptions:
+                      description: DrainOptions tunes the Drain action. Ignored for
+                        other types.
+                      properties:
+                        gracePeriodSeconds:
+                          type: integer
+                        ignoreDaemonSets:
+                          type: boolean
+                        timeoutSeconds:
+                          type: integer
+                      type: object
+                    type:
+                      description: Type is the action kind. One of Cordon, Drain,
+                        Uncordon, Script.
+                      enum:
+                      - Cordon
+                      - Drain
+                      - Uncordon
+                      - Script
+                      type: string
+                  required:
+                  - type
+                  type: object
+                type: array
+              allNodes:
+                default: false
+                description: |-
+                  AllNodes, when true, targets every node in the cluster and ignores
+                  NodeSelector / NodeNames.
+
+                  Same defaulting story as Paused.
+                type: boolean
+              nodeNames:
+                description: |-
+                  NodeNames is an explicit list of node names to act on. Takes precedence
+                  over NodeSelector when non-empty. Ignored when AllNodes is true.
+                items:
+                  type: string
+                type: array
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: |-
+                  NodeSelector selects target nodes by labels. Ignored when NodeNames is
+                  set or AllNodes is true.
+                type: object
+              paused:
+                default: false
+                description: |-
+                  Paused, when true, stops the controller from advancing the run. The
+                  CLI uses this for the attach-then-run workflow:
+                    kubectl nm create ... --paused
+                    kubectl nm attach <name> ./script.sh
+                    kubectl nm run <name>
+
+                  No omitempty + a CRD-level default ensure `paused: false` is always
+                  present in the stored spec, so the "Paused" printer column never
+                  renders blank — even when applied YAML omits the field.
+                type: boolean
+              script:
+                description: |-
+                  Script attaches a single user script to this run. When non-nil and
+                  Actions is empty, the controller synthesizes a default action sequence
+                  of [Cordon, Script, Uncordon].
+                properties:
+                  configMapRef:
+                    description: ConfigMapRef points at a pre-existing ConfigMap holding
+                      the script.
+                    properties:
+                      key:
+                        description: Key defaults to "script.sh" when empty.
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  env:
+                    description: Env is a list of name/value pairs passed to the script's
+                      environment.
+                    items:
+                      description: EnvVar is a simple name/value pair passed into
+                        the runner Pod.
+                      properties:
+                        name:
+                          type: string
+                        value:
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    type: array
+                  image:
+                    description: Image is the runner container image. Defaults to
+                      "alpine:3.19".
+                    type: string
+                  inline:
+                    description: |-
+                      Inline is the script body. When set, the controller materializes it
+                      into a ConfigMap named "nm-<nm-name>-script" in the runner namespace.
+                    type: string
+                  runOnHost:
+                    description: |-
+                      RunOnHost, when true (default), executes the script in the host mount
+                      namespace via nsenter, giving it access to host binaries and filesystem.
+                      When false, the script runs inside the runner Pod only.
+                    type: boolean
+                  timeoutSeconds:
+                    description: TimeoutSeconds caps a single per-node script execution.
+                      Defaults to 600.
+                    minimum: 1
+                    type: integer
+                type: object
+              strategy:
+                description: Strategy controls global safety constraints during the
+                  run.
+                properties:
+                  atOnce:
+                    description: |-
+                      AtOnce, when true, runs against every target node in parallel. Wins
+                      over MaxUnavailable.
+                    type: boolean
+                  maxUnavailable:
+                    description: |-
+                      MaxUnavailable is the maximum number of nodes that can be in any
+                      non-terminal phase at the same time. Defaults to 1 when unset.
+                    minimum: 1
+                    type: integer
+                type: object
+            type: object
+          status:
+            description: NodeMaintenanceStatus is the observed state of a maintenance
+              run.
+            properties:
+              completionTime:
+                format: date-time
+                type: string
+              nodes:
+                items:
+                  description: NodeStatus tracks a single node through the action
+                    sequence.
+                  properties:
+                    completedActions:
+                      items:
+                        type: string
+                      type: array
+                    currentAction:
+                      type: string
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    name:
+                      type: string
+                    phase:
+                      description: Phase is the high-level state of a NodeMaintenance
+                        object or a single node.
+                      enum:
+                      - Pending
+                      - InProgress
+                      - Completed
+                      - Failed
+                      type: string
+                    scriptExitCode:
+                      description: |-
+                        ScriptExitCode is the exit code of the script container once the
+                        Script action terminates. Set to a pointer so "unset" and "0" are
+                        distinguishable.
+                      type: integer
+                    scriptPodName:
+                      description: |-
+                        ScriptPodName is the name of the runner Pod that executed (or is
+                        executing) the Script action for this node. Useful for `kubectl nm logs`.
+                      type: string
+                  required:
+                  - name
+                  - phase
+                  type: object
+                type: array
+              phase:
+                description: Phase is the high-level state of a NodeMaintenance object
+                  or a single node.
+                enum:
+                - Pending
+                - InProgress
+                - Completed
+                - Failed
+                type: string
+              startTime:
+                format: date-time
+                type: string
+              summary:
+                description: |-
+                  Summary rolls per-node phase counts up for at-a-glance progress in
+                  `kubectl get nm`. Recomputed on every reconcile from Nodes.
+                properties:
+                  completed:
+                    type: integer
+                  failed:
+                    type: integer
+                  inProgress:
+                    type: integer
+                  pending:
+                    type: integer
+                  total:
+                    type: integer
+                type: object
+              targets:
+                description: |-
+                  Targets is a one-line human-readable summary of which nodes this run
+                  is targeting ("all", "selector:k=v", "nodes:a,b,c"). The controller
+                  stamps this during the first reconcile based on Spec.{AllNodes,
+                  NodeNames, NodeSelector}, so the "Targets" printer column populates
+                  regardless of whether the NM was created via the CLI or kubectl apply.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

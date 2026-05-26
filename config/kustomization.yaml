@@ -1,0 +1,22 @@
+# Top-level kustomization. Order is the natural dependency order:
+#   1. manager   — creates the ko-system Namespace and the controller Deployment
+#   2. crd       — installs the NodeMaintenance CRD
+#   3. rbac      — ServiceAccount + (Cluster)Role + (Cluster)RoleBinding
+#
+# Override the controller image at deploy time:
+#
+#   cd config && kustomize edit set image ko-controller=ghcr.io/kluster-one/ko-controller:v0.1.0
+#
+# or just: `make deploy IMAGE=ghcr.io/kluster-one/ko-controller:v0.1.0`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- manager
+- crd
+- rbac
+
+images:
+- name: ko-controller
+  newName: ko-controller
+  newTag: dev

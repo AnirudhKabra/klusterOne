@@ -5,7 +5,7 @@
 // the caller (the controller) persist that status in a single Update.
 //
 // Responsibilities:
-//   - resolving the target node set (via NodeNames or NodeSelector),
+//   - resolving the target node set (NodeNames / NodeSelector / AllNodes),
 //   - admitting pending nodes into "InProgress" within the maxUnavailable budget,
 //   - running the next pending action on every in-flight node (one action per Step),
 //   - rolling up per-node phases into a top-level Phase.
@@ -21,8 +21,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	furyv1alpha1 "github.com/fury/fury-controller/api/v1alpha1"
-	"github.com/fury/fury-controller/internal/actions"
+	kov1alpha1 "github.com/AnirudhKabra/klusterOne/api/v1alpha1"
+	"github.com/AnirudhKabra/klusterOne/internal/actions"
 )
 
 // Orchestrator drives a NodeMaintenance run forward by one step per call.
@@ -36,22 +36,66 @@ func New(kube kubernetes.Interface, reg *actions.Registry) *Orchestrator {
 	return &Orchestrator{Kube: kube, Registry: reg}
 }
 
+// Init seeds Status.Nodes / Status.Phase / Status.StartTime on the very first
+// reconcile and populates Status.Summary so the printer columns light up
+// immediately. It is idempotent: subsequent calls (after Nodes is populated)
+// are no-ops and return seeded=false.
+//
+// The controller calls Init before Step on a freshly applied NodeMaintenance,
+// writes status, and re-queues. This guarantees the user sees a non-blank
+// row (Phase=InProgress, Total=N, Pending=N) within one reconcile of apply,
+// independent of how long the first action takes.
+func (o *Orchestrator) Init(ctx context.Context, nm *kov1alpha1.NodeMaintenance) (bool, error) {
+	seeded, err := o.initStatus(ctx, nm)
+	if err != nil {
+		return false, fmt.Errorf("init status: %w", err)
+	}
+	if seeded {
+		o.rollup(nm)
+	}
+	return seeded, nil
+}
+
 // Step performs a single advance of the run:
 //  1. Initializes status.Nodes if empty.
-//  2. Promotes Pending → InProgress up to MaxUnavailable.
+//  2. Promotes Pending → InProgress up to the effective budget.
 //  3. Runs the next un-completed action on each InProgress node.
 //  4. Rolls per-node phases up into the top-level Phase.
 //
 // It returns true if the caller should re-queue (more work remains), false
 // once the run has reached a terminal phase.
-func (o *Orchestrator) Step(ctx context.Context, nm *furyv1alpha1.NodeMaintenance) (bool, error) {
+func (o *Orchestrator) Step(ctx context.Context, nm *kov1alpha1.NodeMaintenance) (bool, error) {
 	logger := log.FromContext(ctx).WithValues("nodeMaintenance", nm.Name)
 
-	if err := o.initStatus(ctx, nm); err != nil {
+	if _, err := o.initStatus(ctx, nm); err != nil {
 		return false, fmt.Errorf("init status: %w", err)
 	}
 
+	/*
+		After initStatus:
+
+		status:
+		phase: InProgress
+		startTime: 2026-05-25T14:30:00Z
+		nodes:
+			- { name: node-a, phase: Pending, lastTransitionTime: 14:30:00 }
+			- { name: node-b, phase: Pending, lastTransitionTime: 14:30:00 }
+			- { name: node-c, phase: Pending, lastTransitionTime: 14:30:00 }
+	*/
+
 	o.admit(nm)
+
+	/*
+		After first epoch of admin()
+
+		status:
+		phase: InProgress
+		startTime: 2026-05-25T14:30:00Z
+		nodes:
+			- { name: node-a, phase: InProgress, lastTransitionTime: 14:30:05 }   # promoted
+			- { name: node-b, phase: InProgress, lastTransitionTime: 14:30:05 }   # promoted
+			- { name: node-c, phase: Pending,    lastTransitionTime: 14:30:00 }   # untouched
+	*/
 
 	if err := o.runActions(ctx, nm); err != nil {
 		logger.Error(err, "action execution returned error; per-node status reflects details")
@@ -61,46 +105,78 @@ func (o *Orchestrator) Step(ctx context.Context, nm *furyv1alpha1.NodeMaintenanc
 	return !done, nil
 }
 
-// initStatus seeds status.Nodes on the first reconcile and stamps StartTime.
-func (o *Orchestrator) initStatus(ctx context.Context, nm *furyv1alpha1.NodeMaintenance) error {
-	if len(nm.Status.Nodes) > 0 {
-		return nil
+// EffectiveActions returns the action list the orchestrator actually runs.
+// When the user left Actions empty but attached a Script, we synthesize a
+// safe default sequence of [Cordon, Script, Uncordon].
+func EffectiveActions(spec *kov1alpha1.NodeMaintenanceSpec) []kov1alpha1.ActionSpec {
+	if len(spec.Actions) > 0 {
+		return spec.Actions
 	}
-	names, err := o.resolveNodes(ctx, &nm.Spec)
-	if err != nil {
-		return err
-	}
-	if len(names) == 0 {
-		nm.Status.Phase = furyv1alpha1.PhaseCompleted
-		now := metav1.Now()
-		nm.Status.StartTime = &now
-		nm.Status.CompletionTime = &now
-		return nil
-	}
-
-	now := metav1.Now()
-	nm.Status.StartTime = &now
-	nm.Status.Phase = furyv1alpha1.PhaseInProgress
-	for _, n := range names {
-		nm.Status.Nodes = append(nm.Status.Nodes, furyv1alpha1.NodeStatus{
-			Name:               n,
-			Phase:              furyv1alpha1.PhasePending,
-			LastTransitionTime: &now,
-		})
+	if spec.Script != nil {
+		return []kov1alpha1.ActionSpec{
+			{Type: kov1alpha1.ActionCordon},
+			{Type: kov1alpha1.ActionScript},
+			{Type: kov1alpha1.ActionUncordon},
+		}
 	}
 	return nil
 }
 
+// initStatus seeds status.Nodes on the first reconcile and stamps StartTime.
+// Returns seeded=true when this call actually performed the seeding so the
+// caller can decide whether to persist status before doing more work.
+func (o *Orchestrator) initStatus(ctx context.Context, nm *kov1alpha1.NodeMaintenance) (bool, error) {
+	if len(nm.Status.Nodes) > 0 {
+		return false, nil
+	}
+	// Targets is a pure projection of spec — stamp it whether or not we
+	// find target nodes, so the "Targets" column populates even when the
+	// run resolves to zero nodes and goes straight to Completed.
+	nm.Status.Targets = nm.Spec.SummarizeTargets()
+
+	names, err := o.resolveNodes(ctx, &nm.Spec)
+	if err != nil {
+		return false, err
+	}
+	if len(names) == 0 {
+		nm.Status.Phase = kov1alpha1.PhaseCompleted
+		now := metav1.Now()
+		nm.Status.StartTime = &now
+		nm.Status.CompletionTime = &now
+		return true, nil
+	}
+
+	now := metav1.Now()
+	nm.Status.StartTime = &now
+	nm.Status.Phase = kov1alpha1.PhaseInProgress
+	for _, n := range names {
+		nm.Status.Nodes = append(nm.Status.Nodes, kov1alpha1.NodeStatus{
+			Name:               n,
+			Phase:              kov1alpha1.PhasePending,
+			LastTransitionTime: &now,
+		})
+	}
+	return true, nil
+}
+
 // resolveNodes returns the deterministic, sorted list of target node names.
-// NodeNames takes precedence; otherwise we resolve NodeSelector against the
-// API. An empty selector with no NodeNames matches all nodes (operator opt-in).
-func (o *Orchestrator) resolveNodes(ctx context.Context, spec *furyv1alpha1.NodeMaintenanceSpec) ([]string, error) {
+// AllNodes wins over NodeNames wins over NodeSelector.
+func (o *Orchestrator) resolveNodes(ctx context.Context, spec *kov1alpha1.NodeMaintenanceSpec) ([]string, error) {
+	if spec.AllNodes {
+		return o.listAllNodes(ctx, labels.Everything())
+	}
 	if len(spec.NodeNames) > 0 {
 		out := append([]string(nil), spec.NodeNames...)
 		sort.Strings(out)
 		return out, nil
 	}
-	sel := labels.SelectorFromSet(labels.Set(spec.NodeSelector))
+	if len(spec.NodeSelector) > 0 {
+		return o.listAllNodes(ctx, labels.SelectorFromSet(labels.Set(spec.NodeSelector)))
+	}
+	return nil, nil
+}
+
+func (o *Orchestrator) listAllNodes(ctx context.Context, sel labels.Selector) ([]string, error) {
 	list, err := o.Kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: sel.String()})
 	if err != nil {
 		return nil, err
@@ -113,17 +189,15 @@ func (o *Orchestrator) resolveNodes(ctx context.Context, spec *furyv1alpha1.Node
 	return names, nil
 }
 
-// admit promotes Pending nodes to InProgress while respecting MaxUnavailable.
-// Promotion order matches the (sorted) Status.Nodes slice for determinism.
-func (o *Orchestrator) admit(nm *furyv1alpha1.NodeMaintenance) {
-	budget := nm.Spec.Strategy.MaxUnavailable
-	if budget <= 0 {
-		budget = 1
-	}
+// admit promotes Pending nodes to InProgress while respecting the budget.
+// AtOnce widens the budget to the full node set; otherwise MaxUnavailable
+// (defaulted to 1) applies.
+func (o *Orchestrator) admit(nm *kov1alpha1.NodeMaintenance) {
+	budget := effectiveBudget(nm)
 
 	inFlight := 0
 	for i := range nm.Status.Nodes {
-		if nm.Status.Nodes[i].Phase == furyv1alpha1.PhaseInProgress {
+		if nm.Status.Nodes[i].Phase == kov1alpha1.PhaseInProgress {
 			inFlight++
 		}
 	}
@@ -134,22 +208,32 @@ func (o *Orchestrator) admit(nm *furyv1alpha1.NodeMaintenance) {
 			return
 		}
 		ns := &nm.Status.Nodes[i]
-		if ns.Phase != furyv1alpha1.PhasePending {
+		if ns.Phase != kov1alpha1.PhasePending {
 			continue
 		}
-		ns.Phase = furyv1alpha1.PhaseInProgress
+		ns.Phase = kov1alpha1.PhaseInProgress
 		ns.LastTransitionTime = &now
 		inFlight++
 	}
 }
 
+func effectiveBudget(nm *kov1alpha1.NodeMaintenance) int {
+	if nm.Spec.Strategy.AtOnce {
+		return len(nm.Status.Nodes)
+	}
+	if nm.Spec.Strategy.MaxUnavailable > 0 {
+		return nm.Spec.Strategy.MaxUnavailable
+	}
+	return 1
+}
+
 // runActions advances every InProgress node by exactly one action per Step.
 // On error the node is marked Failed and other nodes are unaffected.
-func (o *Orchestrator) runActions(ctx context.Context, nm *furyv1alpha1.NodeMaintenance) error {
+func (o *Orchestrator) runActions(ctx context.Context, nm *kov1alpha1.NodeMaintenance) error {
 	var firstErr error
 	for i := range nm.Status.Nodes {
 		ns := &nm.Status.Nodes[i]
-		if ns.Phase != furyv1alpha1.PhaseInProgress {
+		if ns.Phase != kov1alpha1.PhaseInProgress {
 			continue
 		}
 		if err := o.advanceNode(ctx, nm, ns); err != nil && firstErr == nil {
@@ -160,18 +244,19 @@ func (o *Orchestrator) runActions(ctx context.Context, nm *furyv1alpha1.NodeMain
 }
 
 // advanceNode runs the next un-completed action against a single node.
-func (o *Orchestrator) advanceNode(ctx context.Context, nm *furyv1alpha1.NodeMaintenance, ns *furyv1alpha1.NodeStatus) error {
+func (o *Orchestrator) advanceNode(ctx context.Context, nm *kov1alpha1.NodeMaintenance, ns *kov1alpha1.NodeStatus) error {
 	logger := log.FromContext(ctx).WithValues("node", ns.Name)
+	plan := EffectiveActions(&nm.Spec)
 	idx := len(ns.CompletedActions)
-	if idx >= len(nm.Spec.Actions) {
+	if idx >= len(plan) {
 		now := metav1.Now()
-		ns.Phase = furyv1alpha1.PhaseCompleted
+		ns.Phase = kov1alpha1.PhaseCompleted
 		ns.CurrentAction = ""
 		ns.LastTransitionTime = &now
 		return nil
 	}
 
-	spec := nm.Spec.Actions[idx]
+	spec := plan[idx]
 	action, err := o.Registry.Get(spec.Type)
 	if err != nil {
 		return o.failNode(ns, fmt.Errorf("resolve action: %w", err))
@@ -185,7 +270,7 @@ func (o *Orchestrator) advanceNode(ctx context.Context, nm *furyv1alpha1.NodeMai
 	ns.CurrentAction = string(spec.Type)
 	logger.Info("executing action", "action", spec.Type)
 
-	if err := action.Execute(ctx, node, spec); err != nil {
+	if err := action.Execute(ctx, nm, node, ns, spec); err != nil {
 		return o.failNode(ns, fmt.Errorf("%s: %w", spec.Type, err))
 	}
 
@@ -194,53 +279,59 @@ func (o *Orchestrator) advanceNode(ctx context.Context, nm *furyv1alpha1.NodeMai
 	ns.LastTransitionTime = &now
 	ns.Message = ""
 
-	if len(ns.CompletedActions) == len(nm.Spec.Actions) {
-		ns.Phase = furyv1alpha1.PhaseCompleted
+	if len(ns.CompletedActions) == len(plan) {
+		ns.Phase = kov1alpha1.PhaseCompleted
 		ns.CurrentAction = ""
 	}
 	return nil
 }
 
-func (o *Orchestrator) failNode(ns *furyv1alpha1.NodeStatus, cause error) error {
+func (o *Orchestrator) failNode(ns *kov1alpha1.NodeStatus, cause error) error {
 	now := metav1.Now()
-	ns.Phase = furyv1alpha1.PhaseFailed
+	ns.Phase = kov1alpha1.PhaseFailed
 	ns.Message = cause.Error()
 	ns.LastTransitionTime = &now
 	return cause
 }
 
-// rollup computes the run-level Phase from per-node phases and stamps
-// CompletionTime when terminal. Returns true when terminal.
-func (o *Orchestrator) rollup(nm *furyv1alpha1.NodeMaintenance) bool {
-	if len(nm.Status.Nodes) == 0 {
-		return nm.Status.Phase == furyv1alpha1.PhaseCompleted
-	}
-
-	allTerminal := true
-	anyFailed := false
+// rollup computes the run-level Phase from per-node phases, stamps
+// CompletionTime when terminal, and writes Status.Summary (per-phase counts
+// surfaced via the "Done"/"Total" printer columns). Returns true when
+// terminal.
+func (o *Orchestrator) rollup(nm *kov1alpha1.NodeMaintenance) bool {
+	var s kov1alpha1.StatusSummary
 	for _, ns := range nm.Status.Nodes {
+		s.Total++
 		switch ns.Phase {
-		case furyv1alpha1.PhaseCompleted:
-		case furyv1alpha1.PhaseFailed:
-			anyFailed = true
+		case kov1alpha1.PhaseCompleted:
+			s.Completed++
+		case kov1alpha1.PhaseFailed:
+			s.Failed++
+		case kov1alpha1.PhaseInProgress:
+			s.InProgress++
 		default:
-			allTerminal = false
+			s.Pending++
 		}
 	}
+	nm.Status.Summary = s
 
-	if !allTerminal {
-		nm.Status.Phase = furyv1alpha1.PhaseInProgress
-		return false
+	if s.Total == 0 {
+		return nm.Status.Phase == kov1alpha1.PhaseCompleted
 	}
 
-	if anyFailed {
-		nm.Status.Phase = furyv1alpha1.PhaseFailed
-	} else {
-		nm.Status.Phase = furyv1alpha1.PhaseCompleted
+	if s.Pending == 0 && s.InProgress == 0 {
+		if s.Failed > 0 {
+			nm.Status.Phase = kov1alpha1.PhaseFailed
+		} else {
+			nm.Status.Phase = kov1alpha1.PhaseCompleted
+		}
+		if nm.Status.CompletionTime == nil {
+			now := metav1.Now()
+			nm.Status.CompletionTime = &now
+		}
+		return true
 	}
-	if nm.Status.CompletionTime == nil {
-		now := metav1.Now()
-		nm.Status.CompletionTime = &now
-	}
-	return true
+
+	nm.Status.Phase = kov1alpha1.PhaseInProgress
+	return false
 }

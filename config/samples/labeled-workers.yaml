@@ -1,0 +1,24 @@
+apiVersion: ko.io/v1alpha1
+kind: NodeMaintenance
+metadata:
+  name: workers-only
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  strategy:
+    maxUnavailable: 1
+  script:
+    inline: |
+      echo "running on $NODE_NAME"
+      sleep 5
+    image: alpine:3.19
+    timeoutSeconds: 120
+  actions:
+    - type: Cordon
+    - type: Drain
+      drainOptions:
+        ignoreDaemonSets: true
+        gracePeriodSeconds: 30
+        timeoutSeconds: 300
+    - type: Script
+    - type: Uncordon
