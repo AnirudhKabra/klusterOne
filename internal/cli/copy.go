@@ -7,12 +7,10 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -50,14 +48,13 @@ func RunPush(ctx context.Context, args []string) error {
 	}
 
 	var (
-		allNodes  bool
-		selector  string
-		nodesCSV  string
-		mode      string
-		keep      bool
-		timeout   time.Duration
-		nmName    string
-		namespace string
+		allNodes bool
+		selector string
+		nodesCSV string
+		mode     string
+		keep     bool
+		timeout  time.Duration
+		nmName   string
 	)
 	fs.BoolVar(&allNodes, "all-nodes", false, "Target every node.")
 	fs.StringVar(&selector, "selector", "", "Label selector, e.g. role=worker.")
@@ -66,7 +63,6 @@ func RunPush(ctx context.Context, args []string) error {
 	fs.BoolVar(&keep, "keep", false, "Don't delete the NodeMaintenance after success.")
 	fs.DurationVar(&timeout, "timeout", 5*time.Minute, "Overall wait timeout for the rollout.")
 	fs.StringVar(&nmName, "name", "", "Override NodeMaintenance name (default: kone-push-<rand>).")
-	fs.StringVar(&namespace, "namespace", "ko-system", "Runner namespace.")
 
 	if hasHelpFlag(args) {
 		fs.Usage()
@@ -117,7 +113,7 @@ func RunPush(ctx context.Context, args []string) error {
 
 	return runCopyNM(ctx, copyRunSpec{
 		nmName:     nmName,
-		namespace:  namespace,
+		namespace:  RunnerNamespace,
 		script:     script,
 		allNodes:   allNodes,
 		selector:   selector,
@@ -142,17 +138,15 @@ func RunPull(ctx context.Context, args []string) error {
 	}
 
 	var (
-		node      string
-		keep      bool
-		timeout   time.Duration
-		nmName    string
-		namespace string
+		node    string
+		keep    bool
+		timeout time.Duration
+		nmName  string
 	)
 	fs.StringVar(&node, "node", "", "Source node (required).")
 	fs.BoolVar(&keep, "keep", false, "Don't delete the NodeMaintenance after success.")
 	fs.DurationVar(&timeout, "timeout", 5*time.Minute, "Overall wait timeout.")
 	fs.StringVar(&nmName, "name", "", "Override NodeMaintenance name (default: kone-pull-<rand>).")
-	fs.StringVar(&namespace, "namespace", "ko-system", "Runner namespace.")
 
 	if hasHelpFlag(args) {
 		fs.Usage()
@@ -185,7 +179,14 @@ func RunPull(ctx context.Context, args []string) error {
 		return err
 	}
 
-	if err := createCopyNM(ctx, clients, nmName, namespace, script, false, "", node, int64(timeout/time.Second)); err != nil {
+	// Ask the Script action to mirror the runner Pod's stdout into a
+	// dedicated CM before it deletes the Pod. Reading the CM after
+	// completion is race-free; reading Pod logs is not (the Pod is
+	// already gone by the time the NM transitions to Completed).
+	outputCM := fmt.Sprintf("nm-%s-output", nmName)
+	anns := map[string]string{"ko.io/output-configmap": outputCM}
+
+	if err := createCopyNM(ctx, clients, nmName, RunnerNamespace, script, false, "", node, int64(timeout/time.Second), anns); err != nil {
 		return err
 	}
 	fmt.Printf("nodemaintenance.ko.io/%s created (pull %s:%s → %s)\n", nmName, node, remotePath, localPath)
@@ -194,13 +195,17 @@ func RunPull(ctx context.Context, args []string) error {
 		return err
 	}
 
-	podName, err := getRunnerPodName(ctx, clients, nmName, node)
+	cm, err := clients.Kube.CoreV1().ConfigMaps(RunnerNamespace).Get(ctx, outputCM, metav1.GetOptions{})
 	if err != nil {
-		return err
+		return fmt.Errorf("read output configmap %s/%s: %w", RunnerNamespace, outputCM, err)
 	}
-	logs, err := fetchPodLogs(ctx, clients, namespace, podName)
-	if err != nil {
-		return fmt.Errorf("fetch pod logs: %w", err)
+	// The controller writes BinaryData["output"]; older NMs (or future
+	// callers) might use Data["output"] instead. Accept both.
+	logs := cm.BinaryData["output"]
+	if len(logs) == 0 {
+		if v, ok := cm.Data["output"]; ok {
+			logs = []byte(v)
+		}
 	}
 	payload, err := extractPayload(logs)
 	if err != nil {
@@ -216,6 +221,8 @@ func RunPull(ctx context.Context, args []string) error {
 	fmt.Printf("wrote %d bytes to %s\n", len(decoded), localPath)
 
 	if !keep {
+		// NM delete cascades to both the script CM and the output CM via
+		// ownerReferences — no manual cleanup needed.
 		_ = clients.Dyn.Resource(NodeMaintenanceGVR).Delete(ctx, nmName, metav1.DeleteOptions{})
 	}
 	return nil
@@ -241,7 +248,7 @@ func runCopyNM(ctx context.Context, s copyRunSpec) error {
 	if err != nil {
 		return err
 	}
-	if err := createCopyNM(ctx, clients, s.nmName, s.namespace, s.script, s.allNodes, s.selector, s.nodesCSV, int64(s.timeout/time.Second)); err != nil {
+	if err := createCopyNM(ctx, clients, s.nmName, s.namespace, s.script, s.allNodes, s.selector, s.nodesCSV, int64(s.timeout/time.Second), nil); err != nil {
 		return err
 	}
 	fmt.Printf("nodemaintenance.ko.io/%s created (%s)\n", s.nmName, s.announce)
@@ -263,7 +270,7 @@ func runCopyNM(ctx context.Context, s copyRunSpec) error {
 	return nil
 }
 
-func createCopyNM(ctx context.Context, c *Clients, name, namespace, script string, allNodes bool, selector, nodesCSV string, timeoutSec int64) error {
+func createCopyNM(ctx context.Context, c *Clients, name, namespace, script string, allNodes bool, selector, nodesCSV string, timeoutSec int64, extraAnnotations map[string]string) error {
 	if err := ensureNamespace(ctx, c, namespace); err != nil {
 		return fmt.Errorf("ensure namespace %s: %w", namespace, err)
 	}
@@ -272,23 +279,27 @@ func createCopyNM(ctx context.Context, c *Clients, name, namespace, script strin
 		return fmt.Errorf("upsert script configmap: %w", err)
 	}
 
-	nm := buildCopyNM(name, namespace, allNodes, selector, nodesCSV, timeoutSec)
+	nm := buildCopyNM(name, allNodes, selector, nodesCSV, timeoutSec, extraAnnotations)
 	nm.Spec.Script.ConfigMapRef = &kov1alpha1.ScriptConfigMapRef{Name: cmName}
 
 	u, err := toUnstructured(nm)
 	if err != nil {
 		return err
 	}
-	if _, err := c.Dyn.Resource(NodeMaintenanceGVR).Create(ctx, u, metav1.CreateOptions{}); err != nil {
+	live, err := c.Dyn.Resource(NodeMaintenanceGVR).Create(ctx, u, metav1.CreateOptions{})
+	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("a NodeMaintenance named %q already exists; pass --name to override", name)
 		}
 		return fmt.Errorf("create NodeMaintenance: %w", err)
 	}
+	if err := setConfigMapOwner(ctx, c, namespace, cmName, live); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: configmap/%s ownerReferences not set (CM will not be garbage-collected with the NM): %v\n", cmName, err)
+	}
 	return nil
 }
 
-func buildCopyNM(name, namespace string, allNodes bool, selector, nodesCSV string, timeoutSec int64) *kov1alpha1.NodeMaintenance {
+func buildCopyNM(name string, allNodes bool, selector, nodesCSV string, timeoutSec int64, extraAnnotations map[string]string) *kov1alpha1.NodeMaintenance {
 	runOnHost := true
 	if timeoutSec <= 0 {
 		timeoutSec = 300
@@ -327,13 +338,16 @@ func buildCopyNM(name, namespace string, allNodes bool, selector, nodesCSV strin
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec:       spec,
 	}
-	anns := map[string]string{
-		"ko.io/runner-namespace": namespace,
+	anns := map[string]string{}
+	for k, v := range extraAnnotations {
+		anns[k] = v
 	}
 	if t := spec.SummarizeTargets(); t != "" {
 		anns["ko.io/targets"] = t
 	}
-	nm.SetAnnotations(anns)
+	if len(anns) > 0 {
+		nm.SetAnnotations(anns)
+	}
 	return nm
 }
 
@@ -415,46 +429,12 @@ func printNodeSummary(ctx context.Context, c *Clients, name string) error {
 	return nil
 }
 
-func getRunnerPodName(ctx context.Context, c *Clients, nmName, node string) (string, error) {
-	u, err := c.Dyn.Resource(NodeMaintenanceGVR).Get(ctx, nmName, metav1.GetOptions{})
-	if err != nil {
-		return "", err
-	}
-	nodes, _, _ := unstructured.NestedSlice(u.Object, "status", "nodes")
-	for _, raw := range nodes {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		nName, _, _ := unstructured.NestedString(m, "name")
-		if nName != node {
-			continue
-		}
-		pod, _, _ := unstructured.NestedString(m, "scriptPodName")
-		if pod == "" {
-			return "", fmt.Errorf("scriptPodName not recorded for node %s", node)
-		}
-		return pod, nil
-	}
-	return "", fmt.Errorf("node %s not present in status.nodes", node)
-}
-
-func fetchPodLogs(ctx context.Context, c *Clients, namespace, pod string) ([]byte, error) {
-	req := c.Kube.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{Container: "run"})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer stream.Close()
-	return io.ReadAll(stream)
-}
-
 func extractPayload(logs []byte) (string, error) {
 	s := string(logs)
 	bIdx := strings.Index(s, pullSentinelBegin)
 	eIdx := strings.Index(s, pullSentinelEnd)
 	if bIdx < 0 || eIdx < 0 || eIdx <= bIdx {
-		return "", fmt.Errorf("payload sentinels not found in pod logs (file probably missing or script failed)")
+		return "", fmt.Errorf("payload sentinels not found in captured output (file probably missing or script failed)")
 	}
 	payload := s[bIdx+len(pullSentinelBegin) : eIdx]
 	return strings.TrimSpace(payload), nil

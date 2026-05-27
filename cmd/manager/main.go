@@ -39,13 +39,18 @@ func init() {
 	utilruntime.Must(kov1alpha1.AddToScheme(scheme))     //Adding our custom resource to the scheme...
 }
 
+// runnerNamespace is the namespace where the Script action creates runner
+// Pods and where the CLI puts the backing script ConfigMaps. It is a fixed
+// convention, not a tunable — the corresponding `RunnerNamespace` constant
+// in `internal/cli/clients.go` must stay in sync.
+const runnerNamespace = "ko-system"
+
 func main() {
 	var (
 		metricsAddr        string
 		probeAddr          string
 		drainTimeout       time.Duration
 		requeueInterval    time.Duration
-		runnerNamespace    string
 		runnerImage        string
 		runnerKeepPods     bool
 		runnerPollInterval time.Duration
@@ -54,7 +59,6 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "Address the health probe binds to.")
 	flag.DurationVar(&drainTimeout, "drain-default-timeout", 5*time.Minute, "Default per-node drain timeout when not set in the spec.")
 	flag.DurationVar(&requeueInterval, "requeue-interval", 10*time.Second, "How often to re-reconcile in-progress NodeMaintenance objects.")
-	flag.StringVar(&runnerNamespace, "runner-namespace", "ko-system", "Namespace where the Script action creates runner Pods and ConfigMaps.")
 	flag.StringVar(&runnerImage, "runner-image", "alpine:3.19", "Default container image for the Script runner Pod.")
 	flag.BoolVar(&runnerKeepPods, "runner-keep-pods", false, "Keep Script runner Pods around after they terminate (debug).")
 	flag.DurationVar(&runnerPollInterval, "runner-poll-interval", 5*time.Second, "How often the Script action polls the runner Pod for terminal phase.")
@@ -160,6 +164,7 @@ func main() {
 
 	reconciler := &controller.NodeMaintenanceReconciler{
 		Client:          mgr.GetClient(),
+		Kube:            kubeClient,
 		Orchestrator:    orchestrator.New(kubeClient, registry),
 		RequeueInterval: requeueInterval,
 	}

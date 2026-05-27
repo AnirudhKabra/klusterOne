@@ -74,11 +74,14 @@ func RunAttach(ctx context.Context, args []string) error {
 		cmName = fmt.Sprintf("nm-%s-script", name)
 	}
 	if cmNS == "" {
-		cmNS = "ko-system"
+		cmNS = RunnerNamespace
 	}
 
 	if err := upsertScriptConfigMap(ctx, clients, cmNS, cmName, name, string(body)); err != nil {
 		return fmt.Errorf("update configmap %s/%s: %w", cmNS, cmName, err)
+	}
+	if err := setConfigMapOwner(ctx, clients, cmNS, cmName, u); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: configmap/%s ownerReferences not set (CM will not be garbage-collected with the NM): %v\n", cmName, err)
 	}
 	fmt.Printf("configmap/%s in namespace %s updated (%d bytes)\n", cmName, cmNS, len(body))
 	return nil

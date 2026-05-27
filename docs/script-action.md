@@ -86,6 +86,7 @@ metadata:
     pod-security.kubernetes.io/enforce: privileged
 ```
 
-Set `--runner-namespace` on the controller (and `--namespace` on the CLI)
-to a namespace that has this label. The default `ko-system` namespace,
-when installed via the project's manifests, is already labelled this way.
+The default `ko-system` namespace, when installed via the project's
+manifests, is already labelled `privileged`. Runner Pods always land in
+`ko-system` — the runner namespace is a fixed convention, not a runtime
+knob.

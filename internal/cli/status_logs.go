@@ -107,13 +107,11 @@ func RunLogs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var (
-		node    string
-		follow  bool
-		runnerN string
+		node   string
+		follow bool
 	)
 	fs.StringVar(&node, "node", "", "Only show logs for this node.")
 	fs.BoolVar(&follow, "f", false, "Follow logs.")
-	fs.StringVar(&runnerN, "runner-namespace", "", "Override runner namespace (default: annotation or ko-system).")
 
 	if hasHelpFlag(args) {
 		fs.Usage()
@@ -137,13 +135,7 @@ func RunLogs(ctx context.Context, args []string) error {
 		return fmt.Errorf("get nm/%s: %w", name, err)
 	}
 
-	ns := runnerN
-	if ns == "" {
-		ns = u.GetAnnotations()["ko.io/runner-namespace"]
-	}
-	if ns == "" {
-		ns = "ko-system"
-	}
+	ns := RunnerNamespace
 
 	nodes, _, _ := unstructured.NestedSlice(u.Object, "status", "nodes")
 	any := false
@@ -157,12 +149,41 @@ func RunLogs(ctx context.Context, args []string) error {
 			continue
 		}
 		podName, _, _ := unstructured.NestedString(m, "scriptPodName")
-		if podName == "" {
+		tail, _, _ := unstructured.NestedString(m, "scriptLogTail")
+		nPhase, _, _ := unstructured.NestedString(m, "phase")
+		if podName == "" && tail == "" {
 			continue
 		}
 		any = true
-		fmt.Printf("==> %s (pod %s/%s) <==\n", nName, ns, podName)
+		if podName != "" {
+			fmt.Printf("==> %s (pod %s/%s) <==\n", nName, ns, podName)
+		} else {
+			fmt.Printf("==> %s (no runner pod recorded) <==\n", nName)
+		}
+		// Skip the live-stream attempt entirely when we know there is no
+		// pod to read from — just print the cached tail.
+		if podName == "" {
+			if tail != "" {
+				fmt.Printf("%s\n", tail)
+			}
+			continue
+		}
 		if err := streamPodLogs(ctx, clients, ns, podName, follow); err != nil {
+			// Pod gone (the common case once Script.gcPod has fired) —
+			// fall back to the tail we stashed in status before GC.
+			if apierrors.IsNotFound(err) && tail != "" {
+				fmt.Printf("%s\n", tail)
+				fmt.Fprintf(os.Stderr,
+					"  (runner pod was garbage-collected; showing log tail captured in status. "+
+						"Run the controller with --runner-keep-pods to retain the pod for live `kubectl logs`.)\n")
+				continue
+			}
+			if apierrors.IsNotFound(err) {
+				fmt.Fprintf(os.Stderr,
+					"  (runner pod %s no longer exists and no log tail was captured; "+
+						"node phase=%s)\n", podName, orDash(nPhase))
+				continue
+			}
 			fmt.Fprintf(os.Stderr, "  (logs error: %v)\n", err)
 		}
 	}

@@ -225,6 +225,16 @@ type NodeStatus struct {
 	// distinguishable.
 	// +optional
 	ScriptExitCode *int32 `json:"scriptExitCode,omitempty"`
+
+	// ScriptLogTail is the last few KB of the runner Pod's stdout/stderr,
+	// captured by the Script action *before* it garbage-collects the pod.
+	// Lets `kubectl nm logs` show meaningful output after a successful run
+	// even though the runner Pod is gone. Only populated by the Script
+	// action, and only when the runner Pod actually reached a terminal
+	// phase (success or failure). Truncated to ~Script.LogTailBytes (default
+	// 4 KiB) on the controller side to keep the status object small.
+	// +optional
+	ScriptLogTail string `json:"scriptLogTail,omitempty"`
 }
 
 // +kubebuilder:object:root=true

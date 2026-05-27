@@ -251,6 +251,16 @@ spec:
                         Script action terminates. Set to a pointer so "unset" and "0" are
                         distinguishable.
                       type: integer
+                    scriptLogTail:
+                      description: |-
+                        ScriptLogTail is the last few KB of the runner Pod's stdout/stderr,
+                        captured by the Script action *before* it garbage-collects the pod.
+                        Lets `kubectl nm logs` show meaningful output after a successful run
+                        even though the runner Pod is gone. Only populated by the Script
+                        action, and only when the runner Pod actually reached a terminal
+                        phase (success or failure). Truncated to ~Script.LogTailBytes (default
+                        4 KiB) on the controller side to keep the status object small.
+                      type: string
                     scriptPodName:
                       description: |-
                         ScriptPodName is the name of the runner Pod that executed (or is

@@ -2,8 +2,6 @@ apiVersion: ko.io/v1alpha1
 kind: NodeMaintenance
 metadata:
   name: example-script
-  annotations:
-    ko.io/runner-namespace: ko-system
 spec:
   paused: false
   allNodes: true

@@ -28,6 +28,19 @@ const (
 	labelNode    = "ko.io/node"
 	labelAction  = "ko.io/action"
 	annotRunUUID = "ko.io/run-uid"
+
+	// annotOutputCM, when set on a NodeMaintenance, asks the Script action
+	// to persist the runner Pod's full stdout into a ConfigMap with that
+	// name (in the runner namespace) before the Pod is garbage-collected.
+	// This is how `kubectl nm pull` smuggles a file off a node without
+	// racing the Pod's lifecycle: the CM is owned by the NM, so it lives
+	// exactly as long as the NM does.
+	annotOutputCM = "ko.io/output-configmap"
+
+	// maxCapturedOutputBytes bounds how much of the runner Pod's stdout we
+	// will copy into the output ConfigMap. ConfigMaps are capped at 1 MiB
+	// by the API server; we leave ~50 KiB of headroom for metadata.
+	maxCapturedOutputBytes = 1000 * 1024
 )
 
 // Script runs a user-supplied script against a single node by creating a
@@ -108,12 +121,31 @@ func (s *Script) Execute(
 		ns.ScriptExitCode = exit
 	}
 
+	// Capture the log tail *before* GC so it survives the runner Pod's
+	// deletion. This is what `kubectl nm logs` falls back to once the pod
+	// is gone (i.e. always, unless KeepPods is set).
+	tail := s.tailLogs(ctx, terminal)
+	if tail != "" {
+		ns.ScriptLogTail = tail
+	}
+
+	// Opt-in: copy the runner Pod's *full* stdout into a ConfigMap before
+	// we delete the Pod. Used by `kubectl nm pull` to fetch the payload
+	// out-of-band; the CM is owned by the NM and GC'd with it.
+	if cmName := nm.GetAnnotations()[annotOutputCM]; cmName != "" {
+		if err := s.captureOutput(ctx, nm, cmName, terminal); err != nil {
+			// The CLI is waiting on this CM; failing the action is the
+			// right signal. The pod is still cleaned up below.
+			s.gcPod(ctx, terminal)
+			return fmt.Errorf("capture output to configmap %s: %w", cmName, err)
+		}
+	}
+
 	switch terminal.Status.Phase {
 	case corev1.PodSucceeded:
 		s.gcPod(ctx, terminal)
 		return nil
 	case corev1.PodFailed:
-		tail := s.tailLogs(ctx, terminal)
 		s.gcPod(ctx, terminal)
 		return fmt.Errorf("script failed (exit=%s): %s", exitStr(exit), tail)
 	default:
@@ -122,11 +154,85 @@ func (s *Script) Execute(
 	}
 }
 
+// captureOutput streams the runner Pod's full stdout into a ConfigMap that
+// outlives the Pod. The CM carries an ownerReference back at the NM so
+// Kubernetes GC removes it when the NM is deleted (no manual cleanup).
+//
+// Idempotent on the CM: a second call with the same NM uid is a no-op on
+// the ownerReferences list; the Data is overwritten with the latest log
+// snapshot.
+func (s *Script) captureOutput(ctx context.Context, nm *kov1alpha1.NodeMaintenance, cmName string, pod *corev1.Pod) error {
+	if pod == nil {
+		return fmt.Errorf("no terminal pod to capture")
+	}
+	limit := int64(maxCapturedOutputBytes)
+	req := s.Client.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+		Container:  "run",
+		LimitBytes: &limit,
+	})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return fmt.Errorf("open pod logs: %w", err)
+	}
+	defer stream.Close()
+	body, err := io.ReadAll(stream)
+	if err != nil {
+		return fmt.Errorf("read pod logs: %w", err)
+	}
+
+	ownerRef := metav1.OwnerReference{
+		APIVersion: kov1alpha1.GroupVersion.String(),
+		Kind:       "NodeMaintenance",
+		Name:       nm.Name,
+		UID:        nm.UID,
+	}
+	// BinaryData keeps arbitrary bytes safe; pod logs are usually UTF-8
+	// but base64-of-binary payloads (push/pull) need byte fidelity.
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cmName,
+			Namespace: s.RunnerNamespace,
+			Labels: map[string]string{
+				labelOwner: nm.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{ownerRef},
+		},
+		BinaryData: map[string][]byte{"output": body},
+	}
+
+	_, err = s.Client.CoreV1().ConfigMaps(s.RunnerNamespace).Create(ctx, cm, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		existing, getErr := s.Client.CoreV1().ConfigMaps(s.RunnerNamespace).Get(ctx, cmName, metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		existing.BinaryData = cm.BinaryData
+		existing.Labels = cm.Labels
+		hasOwner := false
+		for _, o := range existing.OwnerReferences {
+			if o.UID == nm.UID {
+				hasOwner = true
+				break
+			}
+		}
+		if !hasOwner {
+			existing.OwnerReferences = append(existing.OwnerReferences, ownerRef)
+		}
+		_, err = s.Client.CoreV1().ConfigMaps(s.RunnerNamespace).Update(ctx, existing, metav1.UpdateOptions{})
+	}
+	return err
+}
+
 // ensureConfigMap returns the (configmap name, key) the runner Pod should
 // mount. When the user gave us an inline script we materialize a ConfigMap
 // in the runner namespace; when they gave us a ConfigMapRef we just pass it
 // through. The ref is always resolved against the runner namespace because
 // Pods can only mount ConfigMaps from their own namespace.
+//
+// Materialized CMs carry an ownerReference pointing back at the NM so
+// Kubernetes garbage-collects them when the NM is deleted. NodeMaintenance
+// is cluster-scoped, ConfigMap is namespaced; that direction of ownership
+// is explicitly supported by the Kubernetes GC subsystem.
 func (s *Script) ensureConfigMap(ctx context.Context, nm *kov1alpha1.NodeMaintenance) (string, string, error) {
 	if ref := nm.Spec.Script.ConfigMapRef; ref != nil {
 		key := ref.Key
@@ -141,6 +247,12 @@ func (s *Script) ensureConfigMap(ctx context.Context, nm *kov1alpha1.NodeMainten
 	}
 
 	name := fmt.Sprintf("nm-%s-script", nm.Name)
+	ownerRef := metav1.OwnerReference{
+		APIVersion: kov1alpha1.GroupVersion.String(),
+		Kind:       "NodeMaintenance",
+		Name:       nm.Name,
+		UID:        nm.UID,
+	}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -148,6 +260,7 @@ func (s *Script) ensureConfigMap(ctx context.Context, nm *kov1alpha1.NodeMainten
 			Labels: map[string]string{
 				labelOwner: nm.Name,
 			},
+			OwnerReferences: []metav1.OwnerReference{ownerRef},
 		},
 		Data: map[string]string{
 			defaultScriptKey: nm.Spec.Script.Inline,
@@ -156,7 +269,26 @@ func (s *Script) ensureConfigMap(ctx context.Context, nm *kov1alpha1.NodeMainten
 
 	_, err := s.Client.CoreV1().ConfigMaps(s.RunnerNamespace).Create(ctx, cm, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
-		_, err = s.Client.CoreV1().ConfigMaps(s.RunnerNamespace).Update(ctx, cm, metav1.UpdateOptions{})
+		// Preserve any pre-existing ownerRefs (e.g. from a stale, unrelated
+		// CM with the same name) while making sure ours is present. A blind
+		// .Update with the freshly-constructed object would wipe them.
+		existing, getErr := s.Client.CoreV1().ConfigMaps(s.RunnerNamespace).Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			return "", "", getErr
+		}
+		existing.Data = cm.Data
+		existing.Labels = cm.Labels
+		hasOwner := false
+		for _, o := range existing.OwnerReferences {
+			if o.UID == nm.UID {
+				hasOwner = true
+				break
+			}
+		}
+		if !hasOwner {
+			existing.OwnerReferences = append(existing.OwnerReferences, ownerRef)
+		}
+		_, err = s.Client.CoreV1().ConfigMaps(s.RunnerNamespace).Update(ctx, existing, metav1.UpdateOptions{})
 	}
 	if err != nil {
 		return "", "", err
