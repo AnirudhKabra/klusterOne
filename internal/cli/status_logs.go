@@ -17,12 +17,21 @@ import (
 
 // RunStatus prints a compact view of an NM: phase, paused, plus per-node table.
 func RunStatus(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: kubectl nm status <name>")
+		fmt.Fprintln(os.Stderr, "       Prints phase, paused state, and a per-node action table.")
+	}
+
+	if hasHelpFlag(args) {
+		fs.Usage()
+		return nil
+	}
 	name, rest, err := splitPositional(args, "status", "<name>")
 	if err != nil {
 		return err
 	}
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -95,10 +104,6 @@ func RunStatus(ctx context.Context, args []string) error {
 // RunLogs streams the runner Pod logs for a given NM (and optionally a single
 // node). When --follow is set, we tail the live container.
 func RunLogs(ctx context.Context, args []string) error {
-	name, rest, err := splitPositional(args, "logs", "<name>")
-	if err != nil {
-		return err
-	}
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var (
@@ -109,6 +114,15 @@ func RunLogs(ctx context.Context, args []string) error {
 	fs.StringVar(&node, "node", "", "Only show logs for this node.")
 	fs.BoolVar(&follow, "f", false, "Follow logs.")
 	fs.StringVar(&runnerN, "runner-namespace", "", "Override runner namespace (default: annotation or ko-system).")
+
+	if hasHelpFlag(args) {
+		fs.Usage()
+		return nil
+	}
+	name, rest, err := splitPositional(args, "logs", "<name>")
+	if err != nil {
+		return err
+	}
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}

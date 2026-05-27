@@ -34,13 +34,13 @@ surfaces; `pause` without `--reason` and `run` both clear that annotation.
 | `--max-unavailable N` | Maximum nodes in-flight (default 1)                                  |
 | `--selector k=v,…`    | Label selector for target nodes                                      |
 | `--nodes a,b,c`       | Explicit node names                                                  |
-| `--cordon` / `--uncordon` | Wrap the script with Cordon/Uncordon actions (both default true) |
+| `--cordon` / `--uncordon` | Wrap the script with Cordon/Uncordon actions (both default true). Disable with `--cordon=false` / `--uncordon=false`, or the aliases `--no-cordon` / `--no-uncordon`. |
 | `--drain`             | Insert a Drain action between Cordon and Script                      |
 | `--timeout DURATION`  | Per-node script execution timeout (default 10m)                      |
 | `--image IMG`         | Runner container image (default `alpine:3.19`)                       |
 | `--in-pod`            | Run the script inside the runner Pod (skip `nsenter` to host)        |
 | `--namespace NS`      | Runner namespace where the script ConfigMap is created (default `ko-system`) |
-| `--paused`            | Create paused; flip with `kubectl nm run`                            |
+| `--paused`            | Create paused; flip with `kubectl nm run`. Also makes `--script`/`--inline` optional (use with `kubectl nm attach`). |
 | `--dry-run` / `-o`    | Print the generated NodeMaintenance YAML and exit                    |
 
 See [script-action.md](./script-action.md) for what `--in-pod` and
@@ -48,14 +48,19 @@ See [script-action.md](./script-action.md) for what `--in-pod` and
 
 ## Two-phase workflow (attach → run)
 
-```bash
-# Create the NM in paused mode (placeholder ConfigMap)
-kubectl nm create rolling-patch --inline ':' --selector role=worker --paused
+When `--paused` is set, both `--script` and `--inline` are optional — `create`
+will provision an empty placeholder ConfigMap that `attach` fills in later.
+Without `--paused`, one of the two flags is still required (otherwise an
+empty no-op script would silently "succeed" on every targeted node).
 
-# Drop in (or replace) the real script later
+```bash
+# Create the NM in paused mode — no script body required yet.
+kubectl nm create rolling-patch --selector role=worker --paused
+
+# Drop in (or replace) the real script later.
 kubectl nm attach rolling-patch ./scripts/01.sh
 
-# Kick it off
+# Kick it off.
 kubectl nm run rolling-patch
 ```
 

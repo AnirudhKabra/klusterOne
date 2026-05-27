@@ -50,7 +50,7 @@ install-crd:
 uninstall-crd:
 	kubectl delete -f config/crd/ko.io_nodemaintenances.yaml --ignore-not-found
 
-docker:
+docker: build
 	docker build -t $(IMAGE) .
 
 # deploy installs the CRD, ServiceAccount, (Cluster)Role(Binding)s, Namespace,

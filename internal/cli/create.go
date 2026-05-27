@@ -36,6 +36,8 @@ func RunCreate(ctx context.Context, args []string) error {
 		includeCordon  bool
 		includeUncord  bool
 		includeDrain   bool
+		noCordon       bool
+		noUncord       bool
 		timeout        time.Duration
 		image          string
 		inPod          bool
@@ -51,16 +53,23 @@ func RunCreate(ctx context.Context, args []string) error {
 	fs.IntVar(&maxUnavailable, "max-unavailable", 0, "Max nodes in-flight (default 1; ignored with --at-once).")
 	fs.StringVar(&selector, "selector", "", "Label selector, e.g. role=worker,zone=us-east.")
 	fs.StringVar(&nodes, "nodes", "", "Comma-separated explicit node names.")
-	fs.BoolVar(&includeCordon, "cordon", true, "Include Cordon action.")
-	fs.BoolVar(&includeUncord, "uncordon", true, "Include Uncordon action.")
+	fs.BoolVar(&includeCordon, "cordon", true, "Include Cordon action (disable with --cordon=false or --no-cordon).")
+	fs.BoolVar(&includeUncord, "uncordon", true, "Include Uncordon action (disable with --uncordon=false or --no-uncordon).")
 	fs.BoolVar(&includeDrain, "drain", false, "Include Drain action (between Cordon and Script).")
+	fs.BoolVar(&noCordon, "no-cordon", false, "Alias for --cordon=false.")
+	fs.BoolVar(&noUncord, "no-uncordon", false, "Alias for --uncordon=false.")
 	fs.DurationVar(&timeout, "timeout", 10*time.Minute, "Per-node script execution timeout.")
 	fs.StringVar(&image, "image", "", "Runner image (default alpine:3.19).")
 	fs.BoolVar(&inPod, "in-pod", false, "Run inside the pod (do not nsenter to the host).")
 	fs.StringVar(&namespace, "namespace", "ko-system", "Runner namespace (where ConfigMap is created).")
-	fs.BoolVar(&paused, "paused", false, "Create paused; flip with `kubectl nm run`.")
+	fs.BoolVar(&paused, "paused", false, "Create paused; resume with 'kubectl nm run'. Makes --script/--inline optional.")
 	fs.BoolVar(&dryRun, "dry-run", false, "Print the generated NodeMaintenance YAML without applying.")
 	fs.BoolVar(&outputYAML, "o", false, "Alias for --dry-run (YAML output).")
+
+	if hasHelpFlag(args) {
+		fs.Usage()
+		return nil
+	}
 
 	name, rest, err := splitPositional(args, "create", "<name>")
 	if err != nil {
@@ -71,11 +80,21 @@ func RunCreate(ctx context.Context, args []string) error {
 		return err
 	}
 
-	if scriptPath == "" && inline == "" {
-		return fmt.Errorf("one of --script or --inline is required")
-	}
 	if scriptPath != "" && inline != "" {
 		return fmt.Errorf("--script and --inline are mutually exclusive")
+	}
+	if scriptPath == "" && inline == "" && !paused {
+		return fmt.Errorf("no script provided: pass --script PATH or --inline BODY, " +
+			"or --paused to defer the script and attach it later with 'kubectl nm attach'")
+	}
+
+	// --no-cordon / --no-uncordon are explicit "turn it off" aliases. When set,
+	// they override any default or explicit --cordon=true / --uncordon=true.
+	if noCordon {
+		includeCordon = false
+	}
+	if noUncord {
+		includeUncord = false
 	}
 
 	scriptBody := inline
@@ -148,20 +167,18 @@ func buildNM(
 		}
 	}
 
-	if includeCordon || includeDrain || includeUncordon {
-		if includeCordon {
-			spec.Actions = append(spec.Actions, kov1alpha1.ActionSpec{Type: kov1alpha1.ActionCordon})
-		}
-		if includeDrain {
-			spec.Actions = append(spec.Actions, kov1alpha1.ActionSpec{
-				Type:         kov1alpha1.ActionDrain,
-				DrainOptions: &kov1alpha1.DrainOptions{IgnoreDaemonSets: true},
-			})
-		}
-		spec.Actions = append(spec.Actions, kov1alpha1.ActionSpec{Type: kov1alpha1.ActionScript})
-		if includeUncordon {
-			spec.Actions = append(spec.Actions, kov1alpha1.ActionSpec{Type: kov1alpha1.ActionUncordon})
-		}
+	if includeCordon {
+		spec.Actions = append(spec.Actions, kov1alpha1.ActionSpec{Type: kov1alpha1.ActionCordon})
+	}
+	if includeDrain {
+		spec.Actions = append(spec.Actions, kov1alpha1.ActionSpec{
+			Type:         kov1alpha1.ActionDrain,
+			DrainOptions: &kov1alpha1.DrainOptions{IgnoreDaemonSets: true},
+		})
+	}
+	spec.Actions = append(spec.Actions, kov1alpha1.ActionSpec{Type: kov1alpha1.ActionScript})
+	if includeUncordon {
+		spec.Actions = append(spec.Actions, kov1alpha1.ActionSpec{Type: kov1alpha1.ActionUncordon})
 	}
 
 	nm := &kov1alpha1.NodeMaintenance{

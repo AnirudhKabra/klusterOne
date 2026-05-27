@@ -21,3 +21,16 @@ func splitPositional(args []string, subcmd, posUsage string) (string, []string, 
 	}
 	return args[0], args[1:], nil
 }
+
+// hasHelpFlag reports whether args contains a help-request token in any
+// position. Subcommands call this immediately after registering their flags
+// to short-circuit normal parsing: print usage and exit 0 instead of failing
+// because a help flag was placed before the positional name.
+func hasHelpFlag(args []string) bool {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return true
+		}
+	}
+	return false
+}

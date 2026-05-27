@@ -27,9 +27,19 @@ const pauseReasonAnnotation = "ko.io/pause-reason"
 func RunAttach(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: kubectl nm attach <name> <script-path>")
+		fmt.Fprintln(os.Stderr, "       Overwrites the script ConfigMap backing an existing NM.")
+		fmt.Fprintln(os.Stderr, "       The NM object itself is not modified; safe to run while paused.")
+	}
 
+	if hasHelpFlag(args) {
+		fs.Usage()
+		return nil
+	}
 	if len(args) < 2 {
-		return fmt.Errorf("usage: kubectl nm attach <name> <script-path>")
+		fs.Usage()
+		return fmt.Errorf("missing positional arguments")
 	}
 	name := args[0]
 	scriptPath := args[1]
@@ -78,12 +88,21 @@ func RunAttach(ctx context.Context, args []string) error {
 // annotation. Idempotent: when the NM is already running, prints a friendly
 // message and returns without issuing a patch.
 func RunRun(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: kubectl nm run <name>")
+		fmt.Fprintln(os.Stderr, "       Unpauses an existing NodeMaintenance (clears spec.paused).")
+	}
+
+	if hasHelpFlag(args) {
+		fs.Usage()
+		return nil
+	}
 	name, rest, err := splitPositional(args, "run", "<name>")
 	if err != nil {
 		return err
 	}
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -101,15 +120,20 @@ func RunRun(ctx context.Context, args []string) error {
 // cleared. Idempotent: a no-op when the NM is already paused with the same
 // (or no) reason.
 func RunPause(ctx context.Context, args []string) error {
-	name, rest, err := splitPositional(args, "pause", "<name>")
-	if err != nil {
-		return err
-	}
 	fs := flag.NewFlagSet("pause", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var reason string
 	fs.StringVar(&reason, "reason", "",
 		"Free-form reason for pausing; stored as the ko.io/pause-reason annotation on the NM.")
+
+	if hasHelpFlag(args) {
+		fs.Usage()
+		return nil
+	}
+	name, rest, err := splitPositional(args, "pause", "<name>")
+	if err != nil {
+		return err
+	}
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
