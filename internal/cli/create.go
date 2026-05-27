@@ -41,7 +41,6 @@ func RunCreate(ctx context.Context, args []string) error {
 		timeout        time.Duration
 		image          string
 		inPod          bool
-		namespace      string
 		paused         bool
 		dryRun         bool
 		outputYAML     bool
@@ -61,7 +60,6 @@ func RunCreate(ctx context.Context, args []string) error {
 	fs.DurationVar(&timeout, "timeout", 10*time.Minute, "Per-node script execution timeout.")
 	fs.StringVar(&image, "image", "", "Runner image (default alpine:3.19).")
 	fs.BoolVar(&inPod, "in-pod", false, "Run inside the pod (do not nsenter to the host).")
-	fs.StringVar(&namespace, "namespace", "ko-system", "Runner namespace (where ConfigMap is created).")
 	fs.BoolVar(&paused, "paused", false, "Create paused; resume with 'kubectl nm run'. Makes --script/--inline optional.")
 	fs.BoolVar(&dryRun, "dry-run", false, "Print the generated NodeMaintenance YAML without applying.")
 	fs.BoolVar(&outputYAML, "o", false, "Alias for --dry-run (YAML output).")
@@ -106,7 +104,7 @@ func RunCreate(ctx context.Context, args []string) error {
 		scriptBody = string(b)
 	}
 
-	nm := buildNM(name, namespace, scriptBody, image, timeout, paused, allNodes, atOnce,
+	nm := buildNM(name, scriptBody, image, timeout, paused, allNodes, atOnce,
 		maxUnavailable, selector, nodes, includeCordon, includeDrain, includeUncord, inPod)
 
 	if dryRun || outputYAML {
@@ -124,7 +122,7 @@ func RunCreate(ctx context.Context, args []string) error {
 // list mirror the orchestrator's behavior so the CLI's --no-cordon /
 // --no-uncordon flags do something visible in the printed YAML.
 func buildNM(
-	name, namespace, scriptBody, image string,
+	name, scriptBody, image string,
 	timeout time.Duration,
 	paused, allNodes, atOnce bool,
 	maxUnavailable int,
@@ -189,19 +187,12 @@ func buildNM(
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec:       spec,
 	}
-	// Stash advisory metadata as annotations:
-	//   - ko.io/runner-namespace keeps the CLI and controller in sync about
-	//     where the runner ConfigMap lives.
-	//   - ko.io/targets renders as the "Targets" printer column in
-	//     `kubectl get nm`, giving a one-glance summary of who this run
-	//     touches. Falls back to empty when no target field is set.
-	anns := map[string]string{
-		"ko.io/runner-namespace": namespace,
-	}
+	// ko.io/targets renders as the "Targets" printer column in
+	// `kubectl get nm`, giving a one-glance summary of who this run touches.
+	// Falls back to empty when no target field is set.
 	if t := spec.SummarizeTargets(); t != "" {
-		anns["ko.io/targets"] = t
+		nm.SetAnnotations(map[string]string{"ko.io/targets": t})
 	}
-	nm.SetAnnotations(anns)
 	return nm
 }
 
@@ -235,10 +226,9 @@ func writeYAML(w io.Writer, obj runtime.Object) error {
 // always uses an *external* ConfigMap rather than the inline path so that
 // `kubectl nm attach` can later overwrite it without touching the CR.
 func applyNM(ctx context.Context, c *Clients, nm *kov1alpha1.NodeMaintenance) error {
-	runnerNS := nm.GetAnnotations()["ko.io/runner-namespace"]
-	if runnerNS == "" {
-		runnerNS = "ko-system"
-	}
+	// Always use the canonical runner namespace. The annotation is still
+	// emitted for the controller's benefit but is no longer user-tunable.
+	runnerNS := RunnerNamespace
 
 	if err := ensureNamespace(ctx, c, runnerNS); err != nil {
 		return fmt.Errorf("ensure namespace %s: %w", runnerNS, err)
@@ -267,10 +257,12 @@ func applyNM(ctx context.Context, c *Clients, nm *kov1alpha1.NodeMaintenance) er
 		return err
 	}
 
+	var live *unstructured.Unstructured
 	existing, getErr := c.Dyn.Resource(NodeMaintenanceGVR).Get(ctx, nm.Name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(getErr):
-		if _, err := c.Dyn.Resource(NodeMaintenanceGVR).Create(ctx, u, metav1.CreateOptions{}); err != nil {
+		live, err = c.Dyn.Resource(NodeMaintenanceGVR).Create(ctx, u, metav1.CreateOptions{})
+		if err != nil {
 			return fmt.Errorf("create NodeMaintenance: %w", err)
 		}
 		fmt.Printf("nodemaintenance.ko.io/%s created\n", nm.Name)
@@ -278,10 +270,15 @@ func applyNM(ctx context.Context, c *Clients, nm *kov1alpha1.NodeMaintenance) er
 		return fmt.Errorf("get NodeMaintenance: %w", getErr)
 	default:
 		u.SetResourceVersion(existing.GetResourceVersion())
-		if _, err := c.Dyn.Resource(NodeMaintenanceGVR).Update(ctx, u, metav1.UpdateOptions{}); err != nil {
+		live, err = c.Dyn.Resource(NodeMaintenanceGVR).Update(ctx, u, metav1.UpdateOptions{})
+		if err != nil {
 			return fmt.Errorf("update NodeMaintenance: %w", err)
 		}
 		fmt.Printf("nodemaintenance.ko.io/%s updated\n", nm.Name)
+	}
+
+	if err := setConfigMapOwner(ctx, c, runnerNS, cmName, live); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: configmap/%s ownerReferences not set (CM will not be garbage-collected with the NM): %v\n", cmName, err)
 	}
 	return nil
 }
@@ -339,4 +336,38 @@ func upsertScriptConfigMap(ctx context.Context, c *Clients, ns, name, owner, bod
 		_, err = c.Kube.CoreV1().ConfigMaps(ns).Update(ctx, existing, metav1.UpdateOptions{})
 	}
 	return err
+}
+
+// setConfigMapOwner ensures the script ConfigMap carries an ownerReference to
+// the owning NodeMaintenance, so Kubernetes garbage-collects it whenever the
+// NM is deleted. Cluster-scoped owner + namespaced dependent is an
+// explicitly-supported direction.
+//
+// Idempotent: a no-op when the CM already references the live NM's UID. Also
+// safe for "old" CMs that pre-date this fix — the first time we touch them
+// (e.g. via kubectl nm attach), we'll backfill the ownerRef.
+func setConfigMapOwner(ctx context.Context, c *Clients, ns, cmName string, nm *unstructured.Unstructured) error {
+	if nm == nil || nm.GetUID() == "" {
+		return fmt.Errorf("owner NodeMaintenance has no UID")
+	}
+	cm, err := c.Kube.CoreV1().ConfigMaps(ns).Get(ctx, cmName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	desired := metav1.OwnerReference{
+		APIVersion: nm.GetAPIVersion(),
+		Kind:       nm.GetKind(),
+		Name:       nm.GetName(),
+		UID:        nm.GetUID(),
+	}
+	for _, r := range cm.OwnerReferences {
+		if r.UID == desired.UID {
+			return nil
+		}
+	}
+	cm.OwnerReferences = append(cm.OwnerReferences, desired)
+	if _, err := c.Kube.CoreV1().ConfigMaps(ns).Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		return err
+	}
+	return nil
 }

@@ -18,7 +18,7 @@ spec:
     role: worker
   script:
     configMapRef:
-      name: rolling-patch-script    # must live in the controller --runner-namespace
+      name: rolling-patch-script    # must live in the ko-system namespace
       key: script.sh                # defaults to "script.sh"
     # OR:
     # inline: |

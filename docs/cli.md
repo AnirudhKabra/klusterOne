@@ -41,7 +41,6 @@ surfaces; `pause` without `--reason` and `run` both clear that annotation.
 | `--timeout DURATION`  | Per-node script execution timeout (default 10m)                      |
 | `--image IMG`         | Runner container image (default `alpine:3.19`)                       |
 | `--in-pod`            | Run the script inside the runner Pod (skip `nsenter` to host)        |
-| `--namespace NS`      | Runner namespace where the script ConfigMap is created (default `ko-system`) |
 | `--paused`            | Create paused; flip with `kubectl nm run`. Also makes `--script`/`--inline` optional (use with `kubectl nm attach`). |
 | `--dry-run` / `-o`    | Print the generated NodeMaintenance YAML and exit                    |
 
@@ -68,6 +67,24 @@ kubectl nm run rolling-patch
 
 `attach` only touches the backing ConfigMap; the NM object itself is
 unchanged, so this is a safe operation while the run is paused.
+
+### Runner namespace
+
+The script `ConfigMap` always lives in `ko-system`, alongside the runner
+Pod. This is a fixed convention — there is no `--namespace` flag and the
+runner namespace cannot be overridden at run time.
+
+The script ConfigMap is automatically adopted by its NodeMaintenance via
+`metadata.ownerReferences`, so `kubectl delete nm <name>` cascades to the
+ConfigMap via Kubernetes garbage collection — no orphan script (or pushed
+file payload) is left behind. Adoption happens in two places:
+
+- **`kubectl-nm`** sets the ownerRef immediately after create/attach/push,
+  so the CM is owned within the same command that produced it.
+- **The controller** re-asserts the ownerRef during reconcile. This covers
+  declaratively-applied NMs (`kubectl apply -f my-nm.yaml`) and any older
+  CMs that pre-date this behavior — they're adopted the next time their
+  NM is reconciled.
 
 ## Halting an in-flight run
 
@@ -121,9 +138,12 @@ kubectl nm push ./hook.sh /usr/local/bin/hook \
 ### `kubectl nm pull <remote-path> <local-path>`
 
 Reads `<remote-path>` from a single node back to your laptop at
-`<local-path>`. The script base64-encodes the file between sentinels and
-writes it to runner-pod stdout; the CLI fetches the logs after completion
-and decodes locally. `--node` is required.
+`<local-path>`. The runner-pod script base64-encodes the file between
+sentinels and writes it to stdout. The controller copies the pod's full
+stdout into a dedicated `ConfigMap` (`nm-<name>-output` in `ko-system`)
+*before* deleting the pod; the CLI then reads that CM and decodes the
+payload locally. The output CM is owned by the NM, so it's GC'd
+automatically — no orphaned payloads. `--node` is required.
 
 ```bash
 kubectl nm pull /var/log/audit.log ./audit.log --node node-1

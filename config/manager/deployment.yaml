@@ -33,7 +33,6 @@ spec:
           args:
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
-            - --runner-namespace=ko-system
             - --runner-image=alpine:3.19
             - --requeue-interval=10s
           ports:

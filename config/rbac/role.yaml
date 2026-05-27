@@ -1,5 +1,5 @@
 # Namespaced permissions for ko-controller-manager, confined to the runner
-# namespace (ko-system, matching the operator's --runner-namespace default).
+# namespace `ko-system`.
 #
 # Everything destructive that the Script action needs (creating per-node runner
 # Pods, deleting them when done, reading their logs, owning ConfigMaps that
@@ -7,8 +7,8 @@
 # namespace — even a buggy reconcile cannot create or delete a Pod or
 # ConfigMap anywhere else.
 #
-# If you change the operator's --runner-namespace flag, redeploy this Role
-# (and its binding) into the new namespace.
+# The runner namespace is a fixed convention; the controller has no flag to
+# move it, and the CLI has no override.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
