@@ -9,6 +9,8 @@
 //	kubectl nm run    <name>                    unpause an existing NM
 //	kubectl nm status <name>                    pretty-print phase + per-node table
 //	kubectl nm logs   <name> [--node X]         stream runner-pod logs
+//	kubectl nm push <local> <remote> [targets]  copy a local file onto nodes
+//	kubectl nm pull <remote> <local> --node X   copy a node file back to local
 package main
 
 import (
@@ -46,6 +48,10 @@ func main() {
 		err = cli.RunStatus(ctx, args)
 	case "logs":
 		err = cli.RunLogs(ctx, args)
+	case "push":
+		err = cli.RunPush(ctx, args)
+	case "pull":
+		err = cli.RunPull(ctx, args)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return
@@ -71,6 +77,8 @@ Usage:
   kubectl nm run    <name>
   kubectl nm status <name>
   kubectl nm logs   <name> [--node <node>] [-f]
+  kubectl nm push   <local-path> <remote-path> [--all-nodes|--selector|--nodes]
+  kubectl nm pull   <remote-path> <local-path> --node <node>
 
 Run "kubectl nm <subcommand> -h" for flag details.`)
 }

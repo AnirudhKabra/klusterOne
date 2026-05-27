@@ -9,12 +9,14 @@ plain API-server write. For where it sits in the bigger picture, see
 ## Subcommands
 
 ```text
-kubectl nm create <name> [flags]            build & apply a NodeMaintenance
-kubectl nm attach <name> <script>           overwrite the script ConfigMap for an existing NM
-kubectl nm pause  <name> [--reason TEXT]    pause an in-flight NM (flips spec.paused=true)
-kubectl nm run    <name>                    unpause an existing NM (flips spec.paused=false)
-kubectl nm status <name>                    pretty-print phase + per-node table
-kubectl nm logs   <name> [--node X] [-f]    stream runner-pod logs
+kubectl nm create <name> [flags]                  build & apply a NodeMaintenance
+kubectl nm attach <name> <script>                 overwrite the script ConfigMap for an existing NM
+kubectl nm pause  <name> [--reason TEXT]          pause an in-flight NM (flips spec.paused=true)
+kubectl nm run    <name>                          unpause an existing NM (flips spec.paused=false)
+kubectl nm status <name>                          pretty-print phase + per-node table
+kubectl nm logs   <name> [--node X] [-f]          stream runner-pod logs
+kubectl nm push   <local> <remote> [targets]      copy a local file onto nodes
+kubectl nm pull   <remote> <local> --node X       copy a node file back to local
 ```
 
 Both `pause` and `run` are idempotent — re-running them when the NM is
@@ -92,3 +94,45 @@ The exact semantics of "fence between actions" come from the orchestrator's
 one-action-per-Step invariant — see
 [architecture.md](./architecture.md#what-happens-in-one-reconcile) and
 [reconcile-flow.md](./reconcile-flow.md) for the underlying state machine.
+
+## File copy (`push` / `pull`)
+
+Both commands generate a one-shot `NodeMaintenance` with a single `Script`
+action — no cordon, drain, or uncordon. The CLI waits for completion and
+(by default) deletes the NM afterward. Pass `--keep` to inspect it.
+
+### `kubectl nm push <local-path> <remote-path>`
+
+Writes `<local-path>` onto every targeted node at `<remote-path>` (must be
+absolute). The file is base64-encoded into the runner script; the script
+decodes it into a temp file on the node and atomically renames into place.
+Mode defaults to the local file's mode (`stat` of `<local-path>`).
+
+```bash
+# Drop a kubelet config onto every worker.
+kubectl nm push ./kubelet.conf /etc/kubernetes/kubelet.conf \
+  --selector node-role.kubernetes.io/worker=
+
+# Specific nodes, custom mode, keep the NM for inspection.
+kubectl nm push ./hook.sh /usr/local/bin/hook \
+  --nodes node-1,node-2 --mode 0755 --keep
+```
+
+### `kubectl nm pull <remote-path> <local-path>`
+
+Reads `<remote-path>` from a single node back to your laptop at
+`<local-path>`. The script base64-encodes the file between sentinels and
+writes it to runner-pod stdout; the CLI fetches the logs after completion
+and decodes locally. `--node` is required.
+
+```bash
+kubectl nm pull /var/log/audit.log ./audit.log --node node-1
+```
+
+### Limits
+
+- **~700 KiB per file** in both directions. The script lives in a ConfigMap
+  (1 MiB API limit), and base64 inflates the payload by ~33%.
+- **Binary safe**: base64 round-trip preserves any bytes, including NULs.
+- Anything larger needs a different transport (e.g. a future `FileSync`
+  action that mounts a hostPath volume into the runner Pod).
