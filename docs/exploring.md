@@ -54,9 +54,9 @@ Full CLI reference: [cli.md](./cli.md).
 
 ## 3. Observe what the controller spawns
 
-For each in-flight node the controller materializes a **runner Pod** plus a
-**script ConfigMap** in `ko-system`, and patches the Node for
-cordon/drain/uncordon:
+For each in-flight node the controller materializes a **runner Pod** in
+`ko-system` (and, once per NM, a **script ConfigMap** from
+`spec.script.inline`), and patches the Node for cordon/drain/uncordon:
 
 ```bash
 kubectl -n ko-system get pods,configmaps              # runners + their CMs
@@ -74,7 +74,7 @@ The runner pod's name is recorded in `status.nodes[*].scriptPodName`, so
 |-------------|--------------------------------------|------------------------------------------------------------------------|
 | Pause       | `kubectl nm pause <name> [--reason]` | `kubectl patch nm <name> --type=merge -p '{"spec":{"paused":true}}'`   |
 | Resume      | `kubectl nm run <name>`              | `kubectl patch nm <name> --type=merge -p '{"spec":{"paused":false}}'`  |
-| Swap script | `kubectl nm attach <name> <path>`    | Edit `nm-<name>-script` ConfigMap directly                             |
+| Swap script | `kubectl nm attach <name> <path>`    | `kubectl patch nm <name> --type=merge -p '{"spec":{"script":{"inline":"<body>"}}}'` |
 | Edit spec   | —                                    | `kubectl edit nm <name>`                                               |
 | Delete      | —                                    | `kubectl delete nm <name>`                                             |
 

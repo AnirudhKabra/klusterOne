@@ -10,7 +10,7 @@ plain API-server write. For where it sits in the bigger picture, see
 
 ```text
 kubectl nm create <name> [flags]                  build & apply a NodeMaintenance
-kubectl nm attach <name> <script>                 overwrite the script ConfigMap for an existing NM
+kubectl nm attach <name> <script>                 patch spec.script.inline on an existing NM
 kubectl nm pause  <name> [--reason TEXT]          pause an in-flight NM (flips spec.paused=true)
 kubectl nm run    <name>                          unpause an existing NM (flips spec.paused=false)
 kubectl nm status <name>                          pretty-print phase + per-node table
@@ -29,7 +29,7 @@ surfaces; `pause` without `--reason` and `run` both clear that annotation.
 
 | Flag                  | Meaning                                                              |
 |-----------------------|----------------------------------------------------------------------|
-| `--script PATH`       | Read script from a file (creates a ConfigMap in the runner namespace) |
+| `--script PATH`       | Read script from a file; body is placed in `spec.script.inline` on the NM |
 | `--inline STR`        | Use `STR` as the script body (mutually exclusive with `--script`)    |
 | `--all-nodes`         | Target every node in the cluster                                     |
 | `--at-once`           | Run on all targeted nodes in parallel (overrides `--max-unavailable`)|
@@ -49,10 +49,11 @@ See [script-action.md](./script-action.md) for what `--in-pod` and
 
 ## Two-phase workflow (attach → run)
 
-When `--paused` is set, both `--script` and `--inline` are optional — `create`
-will provision an empty placeholder ConfigMap that `attach` fills in later.
-Without `--paused`, one of the two flags is still required (otherwise an
-empty no-op script would silently "succeed" on every targeted node).
+When `--paused` is set, both `--script` and `--inline` are optional — the
+NM is created with an empty `spec.script.inline` and `attach` fills it in
+later. Without `--paused`, one of the two flags is still required
+(otherwise an empty no-op script would silently "succeed" on every
+targeted node).
 
 ```bash
 # Create the NM in paused mode — no script body required yet.
@@ -65,26 +66,36 @@ kubectl nm attach rolling-patch ./scripts/01.sh
 kubectl nm run rolling-patch
 ```
 
-`attach` only touches the backing ConfigMap; the NM object itself is
-unchanged, so this is a safe operation while the run is paused.
+`attach` is a JSON-merge patch on `spec.script.inline`. The NM's
+`metadata.generation` bumps and the change shows up in API audit logs
+alongside every other spec mutation — re-scripting is auditable, not
+silent.
 
-### Runner namespace
+### Runner namespace and script storage
 
 The script `ConfigMap` always lives in `ko-system`, alongside the runner
 Pod. This is a fixed convention — there is no `--namespace` flag and the
 runner namespace cannot be overridden at run time.
 
-The script ConfigMap is automatically adopted by its NodeMaintenance via
-`metadata.ownerReferences`, so `kubectl delete nm <name>` cascades to the
-ConfigMap via Kubernetes garbage collection — no orphan script (or pushed
-file payload) is left behind. Adoption happens in two places:
+The CLI **never writes the ConfigMap directly**. The script body travels
+on `spec.script.inline` of the NM CR; the controller materializes the
+backing `ConfigMap` (`nm-<name>-script`) on its first reconcile pass and
+re-syncs it whenever `spec.script.inline` changes. That keeps the trust
+surface narrow:
 
-- **`kubectl-nm`** sets the ownerRef immediately after create/attach/push,
-  so the CM is owned within the same command that produced it.
-- **The controller** re-asserts the ownerRef during reconcile. This covers
-  declaratively-applied NMs (`kubectl apply -f my-nm.yaml`) and any older
-  CMs that pre-date this behavior — they're adopted the next time their
-  NM is reconciled.
+- operators only need `nodemaintenances.ko.io` RBAC to run scripts —
+  no `configmaps.update` in `ko-system`,
+- the only principal that ever writes script ConfigMaps is the
+  controller's ServiceAccount, and a `ValidatingAdmissionPolicy`
+  (`config/admission/configmap_lockdown.yaml`) enforces exactly that at
+  admission.
+
+See [security.md](./security.md) for the threat model and the policy
+detail.
+
+The materialized ConfigMap carries an `ownerReference` back at the NM, so
+`kubectl delete nm <name>` cascades to it (and to any `nm-<name>-output`
+CM written by `pull`) via Kubernetes garbage collection.
 
 ## Halting an in-flight run
 

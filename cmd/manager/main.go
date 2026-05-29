@@ -40,9 +40,11 @@ func init() {
 }
 
 // runnerNamespace is the namespace where the Script action creates runner
-// Pods and where the CLI puts the backing script ConfigMaps. It is a fixed
-// convention, not a tunable — the corresponding `RunnerNamespace` constant
-// in `internal/cli/clients.go` must stay in sync.
+// Pods and materializes the backing script ConfigMaps from
+// spec.script.inline. It is a fixed convention, not a tunable — the
+// corresponding `RunnerNamespace` constant in `internal/cli/clients.go`
+// must stay in sync. The CLI only reads from this namespace, never writes
+// ConfigMaps to it; see docs/security.md.
 const runnerNamespace = "ko-system"
 
 func main() {
@@ -164,13 +166,12 @@ func main() {
 
 	reconciler := &controller.NodeMaintenanceReconciler{
 		Client:          mgr.GetClient(),
-		Kube:            kubeClient,
 		Orchestrator:    orchestrator.New(kubeClient, registry),
 		RequeueInterval: requeueInterval,
 	}
 
 	/*
-		The reconciler uses mgr.GetClient() for the NodeMaintenance CR "only". Reads come from a local cache, so they are fast. Writes go to the API server, and then the cache updates later through watch events.
+		The reconciler uses mgr.GetClient() for the NodeMaintenance CR only. Reads come from a local cache, so they are fast. Writes go to the API server, and the cache updates later through watch events.
 
 		The orchestrator uses kubeClient for Nodes, Pods, and ConfigMaps. It always talks directly to the API server for both reads and writes, so it is always up to date and good for real-time actions like cordon, drain, and eviction.
 	*/

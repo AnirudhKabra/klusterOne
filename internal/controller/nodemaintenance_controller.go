@@ -9,8 +9,6 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -19,25 +17,10 @@ import (
 	"github.com/AnirudhKabra/klusterOne/internal/orchestrator"
 )
 
-// runnerNamespace is where script ConfigMaps and runner Pods live. It is a
-// fixed convention — the controller no longer accepts a flag to change it
-// and the CLI has no override. Both ends must agree, so they share the
-// literal "ko-system" (mirrored as `RunnerNamespace` in the CLI).
-const runnerNamespace = "ko-system"
-
 // NodeMaintenanceReconciler reconciles NodeMaintenance objects.
 type NodeMaintenanceReconciler struct {
 	client.Client
 	Orchestrator *orchestrator.Orchestrator
-
-	// Kube is an uncached typed client used for namespaced ConfigMap work
-	// (script CM ownership adoption). The cached `client.Client` is fine
-	// for the cluster-scoped NodeMaintenance CR but would spin up a
-	// cluster-wide ConfigMap informer the moment we touched a CM through
-	// it — and our RBAC only grants ConfigMap access inside ko-system,
-	// which would leave the cache permanently un-synced and block every
-	// reconcile on WaitForCacheSync.
-	Kube kubernetes.Interface
 
 	// RequeueInterval controls how often we re-enter Reconcile while a run
 	// is making progress.
@@ -102,15 +85,6 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	var nm kov1alpha1.NodeMaintenance
 	if err := r.Get(ctx, req.NamespacedName, &nm); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-
-	// Adopt the script ConfigMap before we do anything else, so that
-	// `kubectl delete nm <name>` cascades to its script CM via Kubernetes
-	// garbage collection — independent of how the NM was created (CLI,
-	// `kubectl apply -f`, etc.). Idempotent and intentionally non-fatal: a
-	// transient API error just means we'll try again next reconcile.
-	if err := r.ensureScriptCMOwnership(ctx, &nm); err != nil {
-		logger.V(1).Info("failed to set script ConfigMap ownerReference (will retry)", "error", err.Error())
 	}
 
 	if nm.Status.Phase == kov1alpha1.PhaseCompleted || nm.Status.Phase == kov1alpha1.PhaseFailed {
@@ -190,72 +164,6 @@ func (r *NodeMaintenanceReconciler) pausedRequeue() time.Duration {
 		return r.PausedRequeueInterval
 	}
 	return 15 * time.Second
-}
-
-// ensureScriptCMOwnership adds an ownerReference to the script ConfigMap
-// pointing at this NodeMaintenance, so Kubernetes garbage-collects the CM
-// whenever the NM is deleted. The NM is cluster-scoped and the CM is
-// namespaced — that direction of ownership is explicitly supported by the
-// Kubernetes GC subsystem.
-//
-// Idempotent: returns nil immediately when our UID is already in the CM's
-// ownerReferences. Safe for declaratively-applied NMs (`kubectl apply -f`)
-// whose backing CM was authored by the user without an ownerRef.
-//
-// Falls through with nil for NMs that don't reference a CM (inline scripts,
-// no Script action, etc.) or whose CM doesn't exist yet — in those cases
-// there's nothing to adopt.
-func (r *NodeMaintenanceReconciler) ensureScriptCMOwnership(ctx context.Context, nm *kov1alpha1.NodeMaintenance) error {
-	if nm.Spec.Script == nil || nm.Spec.Script.ConfigMapRef == nil {
-		return nil
-	}
-	ref := nm.Spec.Script.ConfigMapRef
-	if ref.Name == "" {
-		return nil
-	}
-	if r.Kube == nil {
-		// Unit-test path: no typed client wired in. Skip adoption rather
-		// than panic — GC just won't cascade in that environment.
-		return nil
-	}
-	// The CR's ScriptConfigMapRef carries only a Name; the runner namespace
-	// is fixed — both the controller and the CLI agree on `ko-system`. We
-	// intentionally use the uncached typed client here so we don't trip
-	// controller-runtime into starting a cluster-wide ConfigMap informer
-	// (our RBAC scopes ConfigMap access to ko-system only).
-	cms := r.Kube.CoreV1().ConfigMaps(runnerNamespace)
-	cm, err := cms.Get(ctx, ref.Name, metav1.GetOptions{})
-	if err != nil {
-		// CM not yet created (e.g. NM applied first, CM lagging) — nothing
-		// to adopt this reconcile pass; we'll try again next time.
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-
-	for _, o := range cm.OwnerReferences {
-		if o.UID == nm.UID {
-			return nil
-		}
-	}
-
-	cm.OwnerReferences = append(cm.OwnerReferences, metav1.OwnerReference{
-		APIVersion: kov1alpha1.GroupVersion.String(),
-		Kind:       "NodeMaintenance",
-		Name:       nm.Name,
-		UID:        nm.UID,
-	})
-	if _, err := cms.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
-		// Conflict means someone else just touched the CM (e.g. the CLI's
-		// upsertScriptConfigMap). Retry next reconcile against the fresh
-		// resourceVersion.
-		if apierrors.IsConflict(err) {
-			return nil
-		}
-		return err
-	}
-	return nil
 }
 
 // SetupWithManager registers the reconciler with the controller-runtime manager.

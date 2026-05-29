@@ -20,9 +20,15 @@ Pod with:
   scheduled Pod would refuse to land on it.
 - `tolerations: [{operator: Exists}]` — so it lands on tainted/cordoned
   nodes regardless of what's on them.
-- `hostPID`, `hostNetwork`, `hostIPC` — set when `runOnHost: true`
-  (default). These give the runner the same kernel namespaces as the host,
-  which is what makes `nsenter` work.
+- `hostPID: true` — set when `runOnHost: true` (default). This is the
+  *only* host namespace the Pod spec opts into. `nsenter --target 1`
+  reads namespace fds out of `/proc/1/ns/*` and `setns(2)`'s into each
+  one at runtime, so the script ends up in the host's `mount`, `net`,
+  `ipc`, `uts`, and `pid` namespaces regardless. We only need
+  `hostPID` so `/proc/1` actually refers to host PID 1 rather than the
+  container's init.
+- `securityContext.privileged: true` on the main container — provides
+  the `CAP_SYS_ADMIN` that `setns()` requires.
 - An **init container** that copies the script from the ConfigMap onto a
   hostPath directory (`/var/lib/ko-controller/scripts/<id>.sh` by default).
 - A **main container** that runs:
@@ -76,9 +82,12 @@ just lose host-level execution inside the Script step itself.
 
 ## Pod Security Admission interactions
 
-Because the runner Pod uses `hostPID`/`hostNetwork`/`hostIPC` and runs a
-container with `privileged: true`, the **namespace it runs in must allow
-`privileged` Pod Security**:
+Because the runner Pod uses `hostPID` and runs a container with
+`privileged: true` (those are the only host-namespace knobs we need —
+`nsenter --target 1` setns()-es into the host's net/ipc/uts/mount
+namespaces at runtime, so we deliberately leave `hostNetwork` /
+`hostIPC` off), the **namespace it runs in must allow `privileged` Pod
+Security**:
 
 ```yaml
 metadata:

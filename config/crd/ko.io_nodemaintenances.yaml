@@ -145,18 +145,6 @@ spec:
                   Actions is empty, the controller synthesizes a default action sequence
                   of [Cordon, Script, Uncordon].
                 properties:
-                  configMapRef:
-                    description: ConfigMapRef points at a pre-existing ConfigMap holding
-                      the script.
-                    properties:
-                      key:
-                        description: Key defaults to "script.sh" when empty.
-                        type: string
-                      name:
-                        type: string
-                    required:
-                    - name
-                    type: object
                   env:
                     description: Env is a list of name/value pairs passed to the script's
                       environment.
@@ -179,8 +167,8 @@ spec:
                     type: string
                   inline:
                     description: |-
-                      Inline is the script body. When set, the controller materializes it
-                      into a ConfigMap named "nm-<nm-name>-script" in the runner namespace.
+                      Inline is the script body. The controller materializes it into a
+                      ConfigMap named "nm-<nm-name>-script" in the runner namespace.
                     type: string
                   runOnHost:
                     description: |-

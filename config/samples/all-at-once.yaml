@@ -7,35 +7,26 @@ spec:
   strategy:
     atOnce: true
   script:
-    configMapRef:
-      name: nm-all-at-once-uname-script
     # runOnHost: true is the default; the script executes in the host mount
     # namespace via nsenter, so paths like /tmp resolve to the host node's
     # filesystem (verifiable later via `minikube ssh`).
     runOnHost: true
+    inline: |
+      #!/bin/sh
+      # Leave a marker on the host so we can ssh in and confirm the script
+      # actually ran on this node with the right environment. The path
+      # includes NODE_NAME so multi-node clusters get distinct files.
+      set -eu
+      NODE=${NODE_NAME:-unknown}
+      MARKER=/tmp/klusterone-test-${NODE}.txt
+      {
+        echo "klusterone script ran successfully"
+        echo "node:      ${NODE}"
+        echo "hostname:  $(hostname)"
+        echo "timestamp: $(date -u +%FT%TZ)"
+        echo "kernel:    $(uname -srm)"
+      } > "${MARKER}"
+      echo "wrote ${MARKER}:"
+      cat "${MARKER}"
   actions:
     - type: Script
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: nm-all-at-once-uname-script
-  namespace: ko-system
-data:
-  script.sh: |
-    #!/bin/sh
-    # Leave a marker on the host so we can ssh in and confirm the script
-    # actually ran on this node with the right environment. The path
-    # includes NODE_NAME so multi-node clusters get distinct files.
-    set -eu
-    NODE=${NODE_NAME:-unknown}
-    MARKER=/tmp/klusterone-test-${NODE}.txt
-    {
-      echo "klusterone script ran successfully"
-      echo "node:      ${NODE}"
-      echo "hostname:  $(hostname)"
-      echo "timestamp: $(date -u +%FT%TZ)"
-      echo "kernel:    $(uname -srm)"
-    } > "${MARKER}"
-    echo "wrote ${MARKER}:"
-    cat "${MARKER}"

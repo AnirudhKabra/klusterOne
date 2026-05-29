@@ -223,29 +223,31 @@ func (s *Script) captureOutput(ctx context.Context, nm *kov1alpha1.NodeMaintenan
 	return err
 }
 
-// ensureConfigMap returns the (configmap name, key) the runner Pod should
-// mount. When the user gave us an inline script we materialize a ConfigMap
-// in the runner namespace; when they gave us a ConfigMapRef we just pass it
-// through. The ref is always resolved against the runner namespace because
-// Pods can only mount ConfigMaps from their own namespace.
+// ensureConfigMap materializes the script ConfigMap from Spec.Script.Inline
+// into the runner namespace and returns the (name, key) the runner Pod
+// should mount. Pods can only mount ConfigMaps from their own namespace,
+// which is why the CM is pinned here regardless of where the NM was
+// authored.
 //
-// Materialized CMs carry an ownerReference pointing back at the NM so
-// Kubernetes garbage-collects them when the NM is deleted. NodeMaintenance
-// is cluster-scoped, ConfigMap is namespaced; that direction of ownership
-// is explicitly supported by the Kubernetes GC subsystem.
+// The CM is the controller's artifact end-to-end: it carries
+// `ko.io/owner: <nm-name>` as an operability marker (queryable via
+// `kubectl get cm -l ko.io/owner=<nm-name>` and reused as the Pod's
+// label so `kubectl get pod -l ko.io/owner=<nm-name>` works the same)
+// and an ownerReference back to the NM so Kubernetes GC removes it
+// when the NM is deleted. NodeMaintenance is cluster-scoped,
+// ConfigMap is namespaced; that direction of ownership is explicitly
+// supported by the GC subsystem. The ValidatingAdmissionPolicy in
+// config/admission/configmap_lockdown.yaml is what actually makes the
+// controller's SA the only principal that can mutate any ConfigMap in
+// ko-system — it gates by namespace, not by this label.
+//
+// An empty Inline is not an error — it preserves the
+// `kubectl nm create --paused` flow where the operator authors the NM
+// first and supplies the script later via `kubectl nm attach`. The CM
+// still gets created (empty); the CLI's `kubectl nm run` refuses to
+// unpause an NM with an empty script body, so the no-op path is closed
+// at the CLI rather than here.
 func (s *Script) ensureConfigMap(ctx context.Context, nm *kov1alpha1.NodeMaintenance) (string, string, error) {
-	if ref := nm.Spec.Script.ConfigMapRef; ref != nil {
-		key := ref.Key
-		if key == "" {
-			key = defaultScriptKey
-		}
-		return ref.Name, key, nil
-	}
-
-	if nm.Spec.Script.Inline == "" {
-		return "", "", fmt.Errorf("script: neither inline nor configMapRef set")
-	}
-
 	name := fmt.Sprintf("nm-%s-script", nm.Name)
 	ownerRef := metav1.OwnerReference{
 		APIVersion: kov1alpha1.GroupVersion.String(),
@@ -401,9 +403,27 @@ func (s *Script) buildPod(
 
 	// runOnHost path: stage the script onto a hostPath, then nsenter into
 	// PID 1 and execute it from there.
+	//
+	// We only request HostPID, not HostNetwork / HostIPC. The trick is
+	// that `nsenter --target 1 --mount --uts --ipc --net --pid` (see the
+	// Args below) reads namespace fds out of /proc/1/ns/* and setns(2)'s
+	// into each one at runtime — so the script ends up in the host's
+	// net/ipc/uts/mount namespaces *regardless* of what the Pod started
+	// in. All `nsenter` requires from us is:
+	//
+	//   1. /proc/1 must actually be host PID 1, not the container's PID
+	//      1 — that's what HostPID buys us.
+	//   2. CAP_SYS_ADMIN to setns() into namespaces we didn't start in —
+	//      we already get that via securityContext.privileged on the
+	//      main container.
+	//
+	// HostNetwork/HostIPC on the Pod spec would only widen the *runner's
+	// own* pre-nsenter context (the init container's `cp`, kubectl
+	// exec'ing into the Pod for debugging, etc.). The script itself sees
+	// no difference. Leaving them off shrinks the Pod's blast radius for
+	// free and keeps the Pod easier to whitelist narrowly in PSS / Falco
+	// / kube-bench scans.
 	common.HostPID = true
-	common.HostNetwork = true
-	common.HostIPC = true
 	common.Volumes = append(common.Volumes, corev1.Volume{
 		Name: "host-scripts",
 		VolumeSource: corev1.VolumeSource{

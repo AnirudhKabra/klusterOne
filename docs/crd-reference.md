@@ -17,13 +17,9 @@ spec:
   nodeSelector:                     # OR nodeNames, OR allNodes
     role: worker
   script:
-    configMapRef:
-      name: rolling-patch-script    # must live in the ko-system namespace
-      key: script.sh                # defaults to "script.sh"
-    # OR:
-    # inline: |
-    #   #!/bin/sh
-    #   ...
+    inline: |                       # script body; controller materializes
+      #!/bin/sh                     # the backing ConfigMap on reconcile.
+      echo "patching $NODE_NAME"
     image: alpine:3.19              # default
     timeoutSeconds: 600
     runOnHost: true                 # default — nsenter into PID 1

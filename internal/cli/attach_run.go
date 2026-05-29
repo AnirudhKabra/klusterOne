@@ -19,18 +19,43 @@ import (
 // the controller does not read it.
 const pauseReasonAnnotation = "ko.io/pause-reason"
 
-// RunAttach overwrites the ConfigMap backing the script for an existing NM.
-// The NM is looked up by name; we read spec.script.configMapRef and write the
-// new file contents into that ConfigMap. The NM CR is NOT modified — just the
-// data behind it — so the controller will pick up the new script on the next
-// Script action invocation.
+// maxInlineScriptBytes caps the script body we accept on
+// spec.script.inline. The materialized ConfigMap has a hard 1 MiB ceiling
+// in the API server, plus we want headroom for the CR's own metadata and
+// status. 900 KiB leaves room for both without surprises and matches the
+// (~700 KiB-after-base64) ceiling that `push` / `pull` already use.
+const maxInlineScriptBytes = 900 * 1024
+
+// hasScript reports whether the live NM has a script body the controller
+// can execute. Empty inline means `kubectl nm run` would materialize an
+// empty CM and run a no-op on every node — which looks like Completed in
+// `kubectl get nm`. We treat that as a user error and surface it before
+// issuing the patch.
+func hasScript(u *unstructured.Unstructured) bool {
+	inline, _, _ := unstructured.NestedString(u.Object, "spec", "script", "inline")
+	return inline != ""
+}
+
+// RunAttach patches the script body on an existing NodeMaintenance.
+//
+// The new body is written to spec.script.inline on the CR. The controller
+// re-materializes the backing ConfigMap on its next reconcile pass.
+//
+// Why patch the CR rather than the CM directly? Putting the script body on
+// the CR means an attach (a) bumps metadata.generation and shows up in
+// kube-apiserver audit logs alongside every other spec mutation, and (b)
+// only needs nodemaintenances.ko.io permissions — the operator never has to
+// be granted configmaps.update on ko-system. That is the same RBAC bar as
+// kubectl nm create / pause / run, which closes the silent-tamper vector
+// where someone with ko-system ConfigMap write could rewrite scripts behind
+// the NM author's back.
 func RunAttach(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: kubectl nm attach <name> <script-path>")
-		fmt.Fprintln(os.Stderr, "       Overwrites the script ConfigMap backing an existing NM.")
-		fmt.Fprintln(os.Stderr, "       The NM object itself is not modified; safe to run while paused.")
+		fmt.Fprintln(os.Stderr, "       Patches spec.script.inline on an existing NodeMaintenance.")
+		fmt.Fprintln(os.Stderr, "       Safe to run while paused; the controller picks up the new body on the next Script action.")
 	}
 
 	if hasHelpFlag(args) {
@@ -54,42 +79,81 @@ func RunAttach(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", scriptPath, err)
 	}
+	if len(body) > maxInlineScriptBytes {
+		return fmt.Errorf("script too large: %d bytes (limit %d). "+
+			"Inline scripts must fit in a single ConfigMap; "+
+			"split the work across multiple NMs or fetch a larger payload from inside the script.",
+			len(body), maxInlineScriptBytes)
+	}
 
 	clients, err := newClients()
 	if err != nil {
 		return err
 	}
 
+	// Get the NM up front so we can produce friendlier errors than the
+	// patch alone would, and so we can tailor the success message to the
+	// NM's current phase/pause state.
 	u, err := clients.Dyn.Resource(NodeMaintenanceGVR).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("nodemaintenance %q not found", name)
+		}
 		return fmt.Errorf("get nm/%s: %w", name, err)
 	}
+	paused, _, _ := unstructured.NestedBool(u.Object, "spec", "paused")
+	phase, _, _ := unstructured.NestedString(u.Object, "status", "phase")
 
-	cmName, cmNS, _, err := scriptCMRefFromUnstructured(u)
+	// JSON merge patch (RFC 7396): set the new inline body on the CR. The
+	// controller re-materializes the backing CM on its next reconcile.
+	patchObj := map[string]any{
+		"spec": map[string]any{
+			"script": map[string]any{
+				"inline": string(body),
+			},
+		},
+	}
+	patchBytes, err := json.Marshal(patchObj)
 	if err != nil {
-		return fmt.Errorf("inspect spec.script.configMapRef: %w", err)
+		return fmt.Errorf("marshal patch: %w", err)
 	}
-	if cmName == "" {
-		// Fallback to the convention used by `kubectl nm create`.
-		cmName = fmt.Sprintf("nm-%s-script", name)
-	}
-	if cmNS == "" {
-		cmNS = RunnerNamespace
+	if _, err := clients.Dyn.Resource(NodeMaintenanceGVR).Patch(
+		ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{},
+	); err != nil {
+		return fmt.Errorf("patch nm/%s: %w", name, err)
 	}
 
-	if err := upsertScriptConfigMap(ctx, clients, cmNS, cmName, name, string(body)); err != nil {
-		return fmt.Errorf("update configmap %s/%s: %w", cmNS, cmName, err)
+	fmt.Printf("nodemaintenance.ko.io/%s script updated (%d bytes)\n", name, len(body))
+
+	// Surface the most common "what's next" / "wait, didn't this just race?"
+	// concerns. The controller materializes the new body on the next
+	// reconcile pass; what that means for the user depends on whether the
+	// run is paused, in-flight, or already done.
+	switch {
+	case paused:
+		fmt.Printf("  next: kubectl nm run %s   # NM is paused; the new script will apply on resume\n", name)
+	case phase == "InProgress":
+		fmt.Fprintf(os.Stderr,
+			"  warning: NM is in phase InProgress. Nodes already executing the Script action "+
+				"finish with the old body; pending nodes pick up the new one. "+
+				"Use `kubectl nm pause %s` first if you want a clean cutover.\n", name)
+	case phase == "Completed" || phase == "Failed":
+		fmt.Fprintf(os.Stderr,
+			"  note: NM has already finished (phase=%s); the new script will not run. "+
+				"Create a new NM or delete this one and re-create.\n", phase)
 	}
-	if err := setConfigMapOwner(ctx, clients, cmNS, cmName, u); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: configmap/%s ownerReferences not set (CM will not be garbage-collected with the NM): %v\n", cmName, err)
-	}
-	fmt.Printf("configmap/%s in namespace %s updated (%d bytes)\n", cmName, cmNS, len(body))
 	return nil
 }
 
 // RunRun unpauses an existing NodeMaintenance and clears any pause-reason
 // annotation. Idempotent: when the NM is already running, prints a friendly
 // message and returns without issuing a patch.
+//
+// Refuses to start an NM that has no script body attached (empty
+// spec.script.inline). Without this check, the controller would
+// materialize an empty CM and run a no-op script on every targeted node,
+// and the run would show as Completed — the kind of "everything's fine!"
+// failure mode that hides real bugs.
 func RunRun(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -114,6 +178,20 @@ func RunRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	u, err := clients.Dyn.Resource(NodeMaintenanceGVR).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("nodemaintenance %q not found", name)
+		}
+		return fmt.Errorf("get nm/%s: %w", name, err)
+	}
+	if !hasScript(u) {
+		return fmt.Errorf(
+			"nodemaintenance %q has no script attached. Provide one with:\n  kubectl nm attach %s <script-path>",
+			name, name)
+	}
+
 	return setPaused(ctx, clients, name, false, "")
 }
 
