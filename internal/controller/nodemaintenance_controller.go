@@ -9,11 +9,13 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	kov1alpha1 "github.com/AnirudhKabra/klusterOne/api/v1alpha1"
+	"github.com/AnirudhKabra/klusterOne/internal/actions"
 	"github.com/AnirudhKabra/klusterOne/internal/orchestrator"
 )
 
@@ -21,6 +23,20 @@ import (
 type NodeMaintenanceReconciler struct {
 	client.Client
 	Orchestrator *orchestrator.Orchestrator
+
+	// Kube is a direct typed client used to materialize the script
+	// ConfigMap from spec.script.inline before any action runs. The
+	// controller-runtime cached client would spin up a cluster-wide
+	// ConfigMap informer the moment we touched a CM through it, which
+	// we don't want — the controller only has ConfigMap RBAC inside
+	// the runner namespace. A typed client also keeps writes synchronous
+	// so the CM is observable to `kubectl get cm` on the next list.
+	Kube kubernetes.Interface
+
+	// RunnerNamespace is where the script ConfigMap (and runner Pod)
+	// live. Fixed convention shared with the Script action and the CLI;
+	// must match cmd/manager/main.go's `runnerNamespace` constant.
+	RunnerNamespace string
 
 	// RequeueInterval controls how often we re-enter Reconcile while a run
 	// is making progress.
@@ -41,41 +57,39 @@ type NodeMaintenanceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 
 /*
+   Reconcile flow (one Step per call)
+   ----------------------------------
 
-                    ┌──────────────────────────────────────────┐
-                    │            controller-runtime            │
-                    │           (manager's work queue)         │
-                    └────────────┬─────────────────────────────┘
-                                 │ dequeue "default/example-script"
-                                 ▼
-                       ┌───────────────────┐
-                       │ Reconcile(ctx,req)│   ← step boundary
-                       └─────┬─────────────┘
-                             │ r.Get(...)        ←  read from informer cache
-                             │ (phase != terminal)
-                             ▼
-                       ┌───────────────────┐
-                       │ Orchestrator.Step │   ← initStatus → admit → runActions → rollup
-                       └─────┬─────────────┘
-                             │ requeue, _ := ...
-                             ▼
-                       ┌───────────────────┐
-                       │ r.Status().Update │   ← writes new status to API server
-                       └─────┬─────────────┘
-                             │
-              two triggers go back into the queue:
-                             │
-                ┌────────────┴────────────┐
-                ▼                         ▼
-   Update event from informer    RequeueAfter: 10s
-   (sub-second, usually)         (safety floor)
-                │                         │
-                └──────────┬──────────────┘
-                           ▼
-                 next Reconcile() fires
-                           │
-                           ▼
-                (epoch 2 starts here)
+            controller-runtime work queue
+                        │
+                        ▼ dequeue "<name>"
+              ┌───────────────────┐
+              │ Reconcile(ctx,req)│
+              └─────────┬─────────┘
+                        ▼
+                   r.Get(nm)                 ← informer cache
+                        │
+                        ▼
+                terminal phase?              ── yes ──► return
+                        │ no
+                        ▼
+                  status empty?              ── yes ──► Init → persist → requeue
+                        │ no
+                        ▼
+              spec.script != nil?            ── yes ──► EnsureScriptConfigMap
+                        │                                (idempotent, non-fatal)
+                        ▼
+                  spec.paused?               ── yes ──► requeue (no Step)
+                        │ no
+                        ▼
+              Orchestrator.Step              ── admit → runActions → rollup
+                        │
+                        ▼
+              r.Status().Update              ── informer re-enqueues us
+
+   Re-entry triggers:
+     • informer Update event (sub-second, after r.Status().Update)
+     • RequeueAfter: r.RequeueInterval (safety floor)
 */
 
 // Reconcile drives a single NodeMaintenance one step closer to its desired state.
@@ -91,15 +105,12 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	if nm.Spec.Paused {
-		logger.V(1).Info("NodeMaintenance is paused; skipping step")
-		return ctrl.Result{RequeueAfter: r.pausedRequeue()}, nil
-	}
-
-	// Fast first-reconcile path: when status has never been seeded, run only
-	// Init (cheap, sub-second) and persist immediately so `kubectl get nm`
-	// shows Phase/Total/Pending right away instead of leaving the row blank
-	// for the duration of the first action.
+	// First-reconcile fast path: seed status (Phase / Targets / Total /
+	// Pending) so `kubectl get nm` lights up immediately.
+	//
+	// Runs *before* the paused short-circuit on purpose — paused NMs are
+	// what operators inspect during the `create --paused` → `attach` →
+	// `run` review window. A blank row there is the worst first impression.
 	if len(nm.Status.Nodes) == 0 && nm.Status.Phase == "" {
 		seeded, err := r.Orchestrator.Init(ctx, &nm)
 		if err != nil {
@@ -118,6 +129,26 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
+	// Render spec.script.inline into ko-system as a ConfigMap. Idempotent;
+	// non-fatal on transient errors (we retry next pass, and Script.Execute
+	// re-runs the same helper just before the runner Pod as a safety net).
+	//
+	// Runs *before* the paused short-circuit on purpose:
+	//   • pause gates execution (no runner Pod);
+	//   • it does NOT gate rendering (CM still observable).
+	// The CM's ownerRef points back at the NM, so deleting a paused NM
+	// still cleans up via GC.
+	if nm.Spec.Script != nil && r.Kube != nil {
+		if _, _, err := actions.EnsureScriptConfigMap(ctx, r.Kube, &nm, r.RunnerNamespace); err != nil {
+			logger.V(1).Info("failed to materialize script ConfigMap (will retry)", "error", err.Error())
+		}
+	}
+
+	if nm.Spec.Paused {
+		logger.V(1).Info("NodeMaintenance is paused; skipping step")
+		return ctrl.Result{RequeueAfter: r.pausedRequeue()}, nil
+	}
+
 	requeue, stepErr := r.Orchestrator.Step(ctx, &nm)
 	// Step returns (true, nil) — meaning "requeue me."
 
@@ -129,25 +160,17 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 	/*
-		When you call r.Status().Update(), it:
-		1. Writes the new status back to the API server
-		2. Sends a watch event to all informers
-		3. Caches the new status in memory
-		4. Queues a Reconcile() call for this object
-		5. Returns a Result{Requeue: true} to the controller-runtime work queue
+	   r.Status().Update — what happens next:
 
-		client (us)                API server                  informer (us, again)
-		─────────                  ──────────                  ──────────────────────
-		r.Status().Update ───PUT──►│
-								│── store in etcd
-								│── emit MODIFIED watch event ────────►│
-								│                                      │── apply to local cache
-																		│── enqueue req on workqueue
-																						│
-																						▼
-																				Reconcile() fires again
-																				r.Get() returns the new nm
-																				(from cache, not API)
+	     us              apiserver               informer
+	     ──              ────────                ────────
+	     PUT ──────────► store in etcd
+	                     emit MODIFIED ────────► update local cache
+	                                             enqueue req on workqueue
+	                                                      │
+	                                                      ▼
+	                                             Reconcile() fires again
+	                                             (next r.Get hits the cache)
 	*/
 
 	if stepErr != nil {
@@ -177,14 +200,11 @@ func (r *NodeMaintenanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 /*
-	ctrl.NewControllerManagedBy(mgr)
-	→ start configuring a controller under this manager
+   Wiring (read left → right):
 
-	.For(&NodeMaintenance{})
-	→ 	attach a "watch" NodeMaintenance resources
+     NewControllerManagedBy(mgr)   configure a controller on this manager
+     .For(&NodeMaintenance{})      watch NodeMaintenance resources
+     .Complete(r)                  register r; starts with mgr
 
-	.Complete(r)
-	→ wire/register the controller with r, so it will start when the manager starts
-
-	so, with this mgr knows, If NodeMaintenance changes, call r.Reconcile()
+   Net: any change to a NodeMaintenance enqueues r.Reconcile().
 */

@@ -21,17 +21,50 @@ That means:
 A `ValidatingAdmissionPolicy`
 (`config/admission/configmap_lockdown.yaml`) enforces the other half:
 **every** ConfigMap CREATE / UPDATE / DELETE in `ko-system` is denied
-unless the requester is one of two SAs — the controller itself
-(`system:serviceaccount:ko-system:ko-controller-manager`) or
-`system:serviceaccount:kube-system:root-ca-cert-publisher` (which
-auto-publishes `kube-root-ca.crt` into every namespace; blocking it
-would break kubelet's CA distribution). Everyone else, including
-cluster-admins acting through a normal kubeconfig, gets `Forbidden`.
+unless the requester is one of four service accounts. Everyone else,
+including cluster-admins acting through a normal kubeconfig, gets
+`Forbidden`:
+
+| Service account                                    | Why it's exempt                                         |
+|----------------------------------------------------|---------------------------------------------------------|
+| `ko-system:ko-controller-manager`                  | Primary writer — materializes script + output CMs.      |
+| `kube-system:root-ca-cert-publisher`               | Seeds `kube-root-ca.crt` into every namespace.          |
+| `kube-system:generic-garbage-collector`            | Cascades ownerRef deletes (cleans up CMs when their NM is gone). |
+| `kube-system:namespace-controller`                 | Cleans up objects inside a namespace on `kubectl delete ns`. |
+
+The two `kube-system` cleanup SAs are exempt because the lockdown
+otherwise breaks Kubernetes' own housekeeping: without
+`generic-garbage-collector`, a deleted NM's script CM survives in
+`ko-system` forever (the CM has a valid `ownerReference`, but the GC's
+DELETE is Forbidden); without `namespace-controller`,
+`kubectl delete ns ko-system` hangs in `Terminating` forever.
+
+Neither widens the attack surface. GC only deletes dependents whose
+owner UID is already absent, and CREATE is still blocked — so an
+attacker can't plant a CM with a forged owner to make GC delete
+something it shouldn't. Deleting a namespace is itself a cluster-admin
+operation, so the namespace-controller exemption grants no new
+privilege.
 
 `ko-system` is a controller-private namespace by design: privileged Pod
 Security is enabled there so the runner Pod can `nsenter` into host PID
-1, no untrusted workloads belong in it, and now its ConfigMaps are
+1, no untrusted workloads belong in it, and its ConfigMaps are
 controller-only at admission.
+
+### Preflight a write (RBAC vs admission)
+
+`kubectl auth can-i` only checks the *authorization* layer (RBAC,
+Node, Webhook). A cluster-admin will get `yes` for `create/update/delete
+configmaps -n ko-system` — but the write itself will still be Forbidden
+by this VAP, which runs in the *admission* layer on top.
+
+To preflight a write that might be VAP-gated, use server-side dry-run
+(it actually runs admission):
+
+```bash
+kubectl -n ko-system patch cm <name> --type=merge \
+  -p '{...}' --dry-run=server
+```
 
 ## The threat this closes
 
@@ -66,9 +99,12 @@ kubectl nm create demo --inline 'echo hello'
 If the first command succeeds, the policy isn't installed:
 `kubectl get validatingadmissionpolicy ko-system-configmap-lockdown`.
 
-`kube-root-ca.crt` is the one CM that legitimately gets created in
-`ko-system` by something other than the controller. It is published by
-the kube-controller-manager subroutine
-`system:serviceaccount:kube-system:root-ca-cert-publisher`, which the
-policy whitelists explicitly. `kubectl -n ko-system get configmap
-kube-root-ca.crt` should resolve normally on any cluster.
+`kube-root-ca.crt` is the one CM that legitimately gets *created* in
+`ko-system` by something other than the controller — published by
+`kube-system:root-ca-cert-publisher`, which the policy allowlists
+explicitly. `kubectl -n ko-system get configmap kube-root-ca.crt`
+should resolve normally on any cluster.
+
+Deletes by `kube-system:generic-garbage-collector` are similarly
+expected — that's how `kubectl delete nm <name>` cascades cleanup to
+the backing `nm-<name>-script` ConfigMap.

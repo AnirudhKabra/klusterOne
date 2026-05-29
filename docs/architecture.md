@@ -57,7 +57,8 @@ flowchart LR
     cordon -->|patch unschedulable=true| nodes
     uncordon -->|patch unschedulable=false| nodes
     drain -->|policyv1 Eviction| pods
-    script -->|materialize CM from spec.script.inline| cm
+    rec -->|render spec.script.inline<br/>(every reconcile, paused included)| cm
+    script -->|defensive re-sync| cm
     script -->|create pinned Pod<br/>(mounts cm)| pods
     script -. nsenter into PID 1 .-> nodes
     rec -->|Status.Update| nm
@@ -94,25 +95,35 @@ sequenceDiagram
     R->>API: Get nm
     alt nm terminal (Completed/Failed)
         R-->>API: nothing to do
-    else nm paused
-        R-->>API: Result{RequeueAfter: 15s}
     else
-        R->>O: Step(ctx, nm)
-        Note over O: initStatus<br/>(first reconcile only)
-        O->>API: List nodes (selector/all)
-        Note over O: admit Pending → InProgress<br/>(respects maxUnavailable / atOnce)
-        loop for each InProgress node
-            O->>O: idx = len(CompletedActions)
-            O->>API: Get Node
-            O->>A: Execute(ctx, nm, node, ns, spec)
-            A->>K: Patch / Evict / Create Pod
-            A-->>O: nil (advance) or error (fail node)
-            O->>O: Append action to CompletedActions<br/>or mark node Failed
+        opt status empty (first reconcile)
+            R->>O: Init(ctx, nm)
+            Note over O: initStatus<br/>resolveNodes → seed Pending<br/>stamp Phase / Targets / StartTime
+            R->>API: Status().Update(nm)
+            R-->>API: Result{Requeue: true}
         end
-        Note over O: rollup<br/>per-node phases → run phase<br/>+ status.summary counts
-        O-->>R: requeue?
-        R->>API: Status().Update(nm)
-        R-->>API: Result{RequeueAfter: 10s}
+        opt spec.script != nil
+            R->>API: EnsureScriptConfigMap<br/>(nm-<name>-script in ko-system)
+            Note over R: idempotent; runs even when paused<br/>so the CM is inspectable pre-launch
+        end
+        alt nm paused
+            R-->>API: Result{RequeueAfter: 15s}
+        else
+            R->>O: Step(ctx, nm)
+            Note over O: admit Pending → InProgress<br/>(respects maxUnavailable / atOnce)
+            loop for each InProgress node
+                O->>O: idx = len(CompletedActions)
+                O->>API: Get Node
+                O->>A: Execute(ctx, nm, node, ns, spec)
+                A->>K: Patch / Evict / Create Pod
+                A-->>O: nil (advance) or error (fail node)
+                O->>O: Append action to CompletedActions<br/>or mark node Failed
+            end
+            Note over O: rollup<br/>per-node phases → run phase<br/>+ status.summary counts
+            O-->>R: requeue?
+            R->>API: Status().Update(nm)
+            R-->>API: Result{RequeueAfter: 10s}
+        end
     end
 ```
 

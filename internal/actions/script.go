@@ -87,7 +87,7 @@ func (s *Script) Execute(
 		return fmt.Errorf("spec.script is required for the Script action")
 	}
 
-	cmName, cmKey, err := s.ensureConfigMap(ctx, nm)
+	cmName, cmKey, err := EnsureScriptConfigMap(ctx, s.Client, nm, s.RunnerNamespace)
 	if err != nil {
 		return fmt.Errorf("prepare script configmap: %w", err)
 	}
@@ -223,31 +223,42 @@ func (s *Script) captureOutput(ctx context.Context, nm *kov1alpha1.NodeMaintenan
 	return err
 }
 
-// ensureConfigMap materializes the script ConfigMap from Spec.Script.Inline
-// into the runner namespace and returns the (name, key) the runner Pod
-// should mount. Pods can only mount ConfigMaps from their own namespace,
-// which is why the CM is pinned here regardless of where the NM was
-// authored.
+// EnsureScriptConfigMap materializes nm.Spec.Script.Inline into a
+// ConfigMap "nm-<nm-name>-script" in runnerNS. Returns the (name,
+// scriptKey) the runner Pod should mount.
 //
-// The CM is the controller's artifact end-to-end: it carries
-// `ko.io/owner: <nm-name>` as an operability marker (queryable via
-// `kubectl get cm -l ko.io/owner=<nm-name>` and reused as the Pod's
-// label so `kubectl get pod -l ko.io/owner=<nm-name>` works the same)
-// and an ownerReference back to the NM so Kubernetes GC removes it
-// when the NM is deleted. NodeMaintenance is cluster-scoped,
-// ConfigMap is namespaced; that direction of ownership is explicitly
-// supported by the GC subsystem. The ValidatingAdmissionPolicy in
-// config/admission/configmap_lockdown.yaml is what actually makes the
-// controller's SA the only principal that can mutate any ConfigMap in
-// ko-system — it gates by namespace, not by this label.
+// Single source of truth for the script-CM invariant. Two callers:
 //
-// An empty Inline is not an error — it preserves the
-// `kubectl nm create --paused` flow where the operator authors the NM
-// first and supplies the script later via `kubectl nm attach`. The CM
-// still gets created (empty); the CLI's `kubectl nm run` refuses to
-// unpause an NM with an empty script body, so the no-op path is closed
-// at the CLI rather than here.
-func (s *Script) ensureConfigMap(ctx context.Context, nm *kov1alpha1.NodeMaintenance) (string, string, error) {
+//   - controller reconcile loop  — every pass, so the rendered CM is
+//     observable in ko-system as soon as the NM is applied (paused
+//     NMs included).
+//   - Script.Execute             — defensive re-sync immediately
+//     before launching the runner Pod.
+//
+// Each write stamps the CM with:
+//
+//   - label  `ko.io/owner=<nm-name>`  — queryable, and mirrored onto
+//     the runner Pod's labels so `kubectl get cm,pod -l ko.io/owner=X`
+//     returns the full action set.
+//   - ownerReference back to the NM  — Kubernetes GC removes the CM
+//     when the NM is deleted. Cluster-scoped → namespaced ownership
+//     is explicitly supported by the GC subsystem.
+//
+// Idempotent on Data (overwritten from current Inline), Labels, and
+// OwnerReferences (UID-deduped; stale ORs preserved for GC to resolve).
+//
+// Empty Inline is OK: it preserves the
+// `kubectl nm create --paused` → `kubectl nm attach` → `kubectl nm run`
+// flow. The CLI blocks `run` on empty Inline, so the no-op path is
+// closed there, not here.
+//
+// REQUIRES: nm.Spec.Script != nil (Inline is dereferenced).
+//
+// The lockdown VAP in config/admission/configmap_lockdown.yaml is what
+// actually restricts mutation of any CM in runnerNS to the controller
+// SA (+ kube-system GC + namespace-controller for cleanup); it gates
+// by namespace, not by the owner label above.
+func EnsureScriptConfigMap(ctx context.Context, kube kubernetes.Interface, nm *kov1alpha1.NodeMaintenance, runnerNS string) (string, string, error) {
 	name := fmt.Sprintf("nm-%s-script", nm.Name)
 	ownerRef := metav1.OwnerReference{
 		APIVersion: kov1alpha1.GroupVersion.String(),
@@ -258,7 +269,7 @@ func (s *Script) ensureConfigMap(ctx context.Context, nm *kov1alpha1.NodeMainten
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: s.RunnerNamespace,
+			Namespace: runnerNS,
 			Labels: map[string]string{
 				labelOwner: nm.Name,
 			},
@@ -269,12 +280,13 @@ func (s *Script) ensureConfigMap(ctx context.Context, nm *kov1alpha1.NodeMainten
 		},
 	}
 
-	_, err := s.Client.CoreV1().ConfigMaps(s.RunnerNamespace).Create(ctx, cm, metav1.CreateOptions{})
+	cms := kube.CoreV1().ConfigMaps(runnerNS)
+	_, err := cms.Create(ctx, cm, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		// Preserve any pre-existing ownerRefs (e.g. from a stale, unrelated
 		// CM with the same name) while making sure ours is present. A blind
 		// .Update with the freshly-constructed object would wipe them.
-		existing, getErr := s.Client.CoreV1().ConfigMaps(s.RunnerNamespace).Get(ctx, name, metav1.GetOptions{})
+		existing, getErr := cms.Get(ctx, name, metav1.GetOptions{})
 		if getErr != nil {
 			return "", "", getErr
 		}
@@ -290,7 +302,7 @@ func (s *Script) ensureConfigMap(ctx context.Context, nm *kov1alpha1.NodeMainten
 		if !hasOwner {
 			existing.OwnerReferences = append(existing.OwnerReferences, ownerRef)
 		}
-		_, err = s.Client.CoreV1().ConfigMaps(s.RunnerNamespace).Update(ctx, existing, metav1.UpdateOptions{})
+		_, err = cms.Update(ctx, existing, metav1.UpdateOptions{})
 	}
 	if err != nil {
 		return "", "", err

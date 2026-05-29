@@ -167,6 +167,8 @@ func main() {
 	reconciler := &controller.NodeMaintenanceReconciler{
 		Client:          mgr.GetClient(),
 		Orchestrator:    orchestrator.New(kubeClient, registry),
+		Kube:            kubeClient,
+		RunnerNamespace: runnerNamespace,
 		RequeueInterval: requeueInterval,
 	}
 

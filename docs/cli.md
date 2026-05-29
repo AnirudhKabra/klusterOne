@@ -77,17 +77,27 @@ The script `ConfigMap` always lives in `ko-system`, alongside the runner
 Pod. This is a fixed convention — there is no `--namespace` flag and the
 runner namespace cannot be overridden at run time.
 
-The CLI **never writes the ConfigMap directly**. The script body travels
-on `spec.script.inline` of the NM CR; the controller materializes the
-backing `ConfigMap` (`nm-<name>-script`) on its first reconcile pass and
-re-syncs it whenever `spec.script.inline` changes. That keeps the trust
-surface narrow:
+The CLI **never writes the ConfigMap directly**. The script body lives
+on `spec.script.inline` of the NM CR; the controller renders it into
+`nm-<name>-script` on the first reconcile and re-syncs on every change
+to `spec.script.inline`.
+
+Pause gates **execution**, not **rendering**: the CM is materialized
+even when `paused: true`, so during the `create --paused` → `attach` →
+`run` review window the rendered script body is inspectable *before*
+the runner Pod ever launches:
+
+```bash
+kubectl get cm -n ko-system nm-<name>-script -o yaml
+```
+
+This keeps the trust surface narrow:
 
 - operators only need `nodemaintenances.ko.io` RBAC to run scripts —
-  no `configmaps.update` in `ko-system`,
-- the only principal that ever writes script ConfigMaps is the
-  controller's ServiceAccount, and a `ValidatingAdmissionPolicy`
-  (`config/admission/configmap_lockdown.yaml`) enforces exactly that at
+  no `configmaps.update` in `ko-system`;
+- the controller's ServiceAccount is the only principal that may write
+  script ConfigMaps; the `ValidatingAdmissionPolicy` in
+  `config/admission/configmap_lockdown.yaml` enforces that at
   admission.
 
 See [security.md](./security.md) for the threat model and the policy
