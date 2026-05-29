@@ -54,11 +54,17 @@ flowchart TB
     Start([Watch event or 10s requeue]):::entry
     Done([return - no requeue]):::stop
     Loop([RequeueAfter 10s]):::ctrl
+    PausedLoop([RequeueAfter 15s]):::ctrl
 
     subgraph CR [Reconciler controller-runtime]
         direction TB
         Get["r.Get NM"]:::ctrl
         Term{"terminal phase?"}:::ctrl
+        StatusEmpty{"status empty?<br/>first reconcile"}:::ctrl
+        InitSeed["Orchestrator.Init<br/>initStatus seeds status.Nodes<br/>plus Phase plus Targets plus StartTime"]:::ctrl
+        SeedPersist["r.Status.Update<br/>plus Requeue=true"]:::ctrl
+        HasScript{"spec.script != nil?"}:::ctrl
+        EnsureCM["actions.EnsureScriptConfigMap<br/>render spec.script.inline<br/>into nm-name-script in ko-system"]:::ctrl
         Paused{"spec.paused?"}:::ctrl
         Persist["r.Status.Update"]:::ctrl
         Decide{"rollup says terminal?"}:::ctrl
@@ -66,7 +72,6 @@ flowchart TB
 
     subgraph OR [Orchestrator.Step]
         direction TB
-        Init["initStatus<br/>seed status.Nodes once<br/>stamp StartTime"]:::orch
         Admit["admit<br/>count InProgress as inFlight<br/>promote Pending until<br/>inFlight equals maxUnavailable"]:::orch
         Run["runActions<br/>walk status.Nodes<br/>skip non-InProgress"]:::orch
         Adv["advanceNode<br/>idx = len of CompletedActions<br/>pick plan idx"]:::orch
@@ -81,10 +86,14 @@ flowchart TB
 
     Start --> Get --> Term
     Term -- "Completed or Failed" --> Done
-    Term -- "active" --> Paused
-    Paused -- "yes" --> Persist
-    Paused -- "no" --> Init
-    Init --> Admit --> Run --> Adv --> Reg --> Exec
+    Term -- "active" --> StatusEmpty
+    StatusEmpty -- "yes" --> InitSeed --> SeedPersist
+    StatusEmpty -- "no" --> HasScript
+    HasScript -- "yes" --> EnsureCM --> Paused
+    HasScript -- "no" --> Paused
+    Paused -- "yes" --> PausedLoop
+    Paused -- "no" --> Admit
+    Admit --> Run --> Adv --> Reg --> Exec
     Exec -- "ok: append type to<br/>CompletedActions" --> Run
     Exec -- "err: failNode<br/>Phase becomes Failed" --> Run
     Run --> Roll --> Persist
@@ -92,16 +101,28 @@ flowchart TB
     Decide -- "yes" --> Done
     Decide -- "no" --> Loop
     Loop -. "10s" .-> Start
+    PausedLoop -. "15s" .-> Start
+    SeedPersist -. "immediate requeue" .-> Start
 ```
 
 What to take away from this picture:
 
-- **The Reconciler is thin.** It only loads the CR, decides whether to skip
-  (terminal/paused), delegates one `Step` to the Orchestrator, persists status,
-  and decides whether to requeue.
-- **Step is a four-stage pipeline.** `initStatus` is one-shot (only does work
-  on the first reconcile, no-op thereafter). `admit` then `runActions` then
-  `rollup` runs every reconcile.
+- **The Reconciler is thin but not trivially thin.** It does four things
+  before deferring to the Orchestrator: (1) load the CR, (2) bail on
+  terminal, (3) seed status on the first reconcile via `Init`, (4) render
+  the script CM via `EnsureScriptConfigMap`. Only then does it consult
+  `spec.paused` and (if not paused) hand off to `Step`.
+- **Init and EnsureScriptConfigMap run even while paused.** Pause is a
+  fence against *execution* (no Pod creation, no action advancement); it
+  is **not** a fence against *observability* — `kubectl get nm` and
+  `kubectl get cm -n ko-system` light up immediately on apply, paused or
+  not.
+- **Step is still a four-stage pipeline** (`initStatus` → `admit` →
+  `runActions` → `rollup`), but `initStatus` is now usually a no-op:
+  the Reconciler's `Orchestrator.Init` branch runs first and seeds
+  `status.Nodes`, so by the time `Step` re-checks `len(status.Nodes) > 0`
+  there's nothing to seed. The call survives as a belt-and-braces guard
+  against a hypothetical Step-without-Init path.
 - **Action dispatch is one map lookup.** The Orchestrator never knows what an
   Action does — it only calls `Execute` and checks the error.
 
@@ -325,13 +346,14 @@ The Orchestrator's pipeline lives in
 [`internal/orchestrator/orchestrator.go`](../internal/orchestrator/orchestrator.go).
 For quick reference:
 
-```47:86:internal/orchestrator/orchestrator.go
+```67:106:internal/orchestrator/orchestrator.go
 func (o *Orchestrator) Step(ctx context.Context, nm *kov1alpha1.NodeMaintenance) (bool, error) {
 	logger := log.FromContext(ctx).WithValues("nodeMaintenance", nm.Name)
 
-	if err := o.initStatus(ctx, nm); err != nil {
+	if _, err := o.initStatus(ctx, nm); err != nil {
 		return false, fmt.Errorf("init status: %w", err)
 	}
+	// ... (status snapshot diagrams omitted) ...
 
 	o.admit(nm)
 
@@ -344,7 +366,7 @@ func (o *Orchestrator) Step(ctx context.Context, nm *kov1alpha1.NodeMaintenance)
 }
 ```
 
-```203:217:internal/orchestrator/orchestrator.go
+```230:244:internal/orchestrator/orchestrator.go
 // runActions advances every InProgress node by exactly one action per Step.
 // On error the node is marked Failed and other nodes are unaffected.
 func (o *Orchestrator) runActions(ctx context.Context, nm *kov1alpha1.NodeMaintenance) error {
@@ -362,7 +384,7 @@ func (o *Orchestrator) runActions(ctx context.Context, nm *kov1alpha1.NodeMainte
 }
 ```
 
-```219:260:internal/orchestrator/orchestrator.go
+```246:287:internal/orchestrator/orchestrator.go
 // advanceNode runs the next un-completed action against a single node.
 func (o *Orchestrator) advanceNode(ctx context.Context, nm *kov1alpha1.NodeMaintenance, ns *kov1alpha1.NodeStatus) error {
 	logger := log.FromContext(ctx).WithValues("node", ns.Name)
@@ -407,6 +429,11 @@ func (o *Orchestrator) advanceNode(ctx context.Context, nm *kov1alpha1.NodeMaint
 }
 ```
 
+The Reconciler-side pre-`Step` work (`Init` seeding, `EnsureScriptConfigMap`,
+paused short-circuit) lives in
+[`internal/controller/nodemaintenance_controller.go`](../internal/controller/nodemaintenance_controller.go)
+— see the ASCII flow at the top of that file for the exact ordering.
+
 The Registry that `advanceNode` dispatches through is defined in
 [`internal/actions/action.go`](../internal/actions/action.go) and populated
 at controller startup in
@@ -441,11 +468,18 @@ at controller startup in
 - **`spec.strategy.atOnce: true`** — `effectiveBudget` returns
   `len(status.Nodes)`, so all nodes get promoted in R#1 and the run finishes
   in `len(plan)` reconciles instead of `len(plan) * ceil(N/maxUnavailable)`.
-- **`spec.paused: true`** — Reconcile short-circuits between Steps and
-  requeues at 15 s instead of 10 s. Whatever action was *already executing*
-  when pause was applied runs to completion; the **next** action is the one
-  blocked. To hard-stop a running Script, also `kubectl delete pod
-  nm-<name>-<node>`.
+- **`spec.paused: true`** — pause gates *execution*, not *observability*.
+  The Reconciler still:
+    1. seeds status on the first reconcile (so `PHASE / TARGETS / TOTAL`
+       light up in `kubectl get nm` immediately);
+    2. renders `spec.script.inline` into `nm-<name>-script` in
+       `ko-system` (so `kubectl get cm -n ko-system <cm> -o yaml` lets
+       you inspect the script body before unpausing).
+  Then it short-circuits before `Step` and requeues at 15 s instead of
+  10 s. Whatever action was *already executing* when pause was applied
+  runs to completion; the **next** action is the one blocked. To
+  hard-stop a running Script, also
+  `kubectl delete pod nm-<name>-<node>`.
 - **Failed nodes mid-run** — the run continues for the other nodes. After
   the last node settles, `rollup` sees `failed > 0` and sets the run Phase
   to `Failed`. Surviving nodes can be re-driven by deleting the NM and

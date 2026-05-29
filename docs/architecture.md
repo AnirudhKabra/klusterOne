@@ -57,12 +57,12 @@ flowchart LR
     cordon -->|patch unschedulable=true| nodes
     uncordon -->|patch unschedulable=false| nodes
     drain -->|policyv1 Eviction| pods
-    rec -->|render spec.script.inline<br/>(every reconcile, paused included)| cm
+    rec -->|"render spec.script.inline<br/>every reconcile, paused included"| cm
     script -->|defensive re-sync| cm
-    script -->|create pinned Pod<br/>(mounts cm)| pods
+    script -->|"create pinned Pod<br/>mounts cm"| pods
     script -. nsenter into PID 1 .-> nodes
     rec -->|Status.Update| nm
-    ```
+```
 
 The system has three independently-evolving pieces:
 
@@ -103,8 +103,8 @@ sequenceDiagram
             R-->>API: Result{Requeue: true}
         end
         opt spec.script != nil
-            R->>API: EnsureScriptConfigMap<br/>(nm-<name>-script in ko-system)
-            Note over R: idempotent; runs even when paused<br/>so the CM is inspectable pre-launch
+            R->>API: EnsureScriptConfigMap
+            Note over R: writes nm-NAME-script in ko-system<br/>idempotent — runs even when paused<br/>so the CM is inspectable pre-launch
         end
         alt nm paused
             R-->>API: Result{RequeueAfter: 15s}

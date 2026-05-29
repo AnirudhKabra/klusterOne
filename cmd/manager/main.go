@@ -37,6 +37,16 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme)) //Adding built-in k8s resources to the scheme...
 	utilruntime.Must(kov1alpha1.AddToScheme(scheme))     //Adding our custom resource to the scheme...
+
+	/*
+		SchemeBuilder.Register(...)
+				↓
+		collects a list of types (Maps Kind -> Go type)
+				↓
+		AddToScheme(scheme)
+				↓
+		copies those registered types INTO actual scheme
+	*/
 }
 
 // runnerNamespace is the namespace where the Script action creates runner
