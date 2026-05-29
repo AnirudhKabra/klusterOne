@@ -23,8 +23,9 @@ metadata:
 spec:
   nodeNames: [node-a, node-b, node-c]
   script:
-    configMapRef:
-      name: demo-script
+    inline: |
+      #!/bin/sh
+      echo "hello from $NODE_NAME"
   strategy:
     maxUnavailable: 2
   # spec.actions left empty → controller synthesizes [Cordon, Script, Uncordon]

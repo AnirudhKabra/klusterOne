@@ -22,8 +22,8 @@ flowchart LR
     end
 
     subgraph API["Kubernetes API Server"]
-        nm[("NodeMaintenance CR<br/>(spec + status)")]
-        cm[("ConfigMap<br/>nm-&lt;name&gt;-script")]
+        nm[("NodeMaintenance CR<br/>(spec.script.inline + status)")]
+        cm[("ConfigMap<br/>nm-&lt;name&gt;-script<br/>(controller-managed)")]
         nodes[("Nodes")]
         pods[("Runner Pods<br/>(ko-system ns)")]
     end
@@ -42,9 +42,8 @@ flowchart LR
     end
 
     user --> CLI
-    cli_create -->|create/update| nm
-    cli_create -->|create/update| cm
-    cli_attach -->|patch data| cm
+    cli_create -->|create/update spec.script.inline| nm
+    cli_attach -->|patch spec.script.inline| nm
     cli_pause -->|patch spec.paused=true<br/>+ ko.io/pause-reason annotation| nm
     cli_run -->|patch spec.paused=false<br/>clears pause-reason| nm
     cli_status -->|get| nm
@@ -58,17 +57,21 @@ flowchart LR
     cordon -->|patch unschedulable=true| nodes
     uncordon -->|patch unschedulable=false| nodes
     drain -->|policyv1 Eviction| pods
-    script -->|create pinned Pod| pods
+    rec -->|render spec.script.inline<br/>(every reconcile, paused included)| cm
+    script -->|defensive re-sync| cm
+    script -->|create pinned Pod<br/>(mounts cm)| pods
     script -. nsenter into PID 1 .-> nodes
     rec -->|Status.Update| nm
-```
+    ```
 
 The system has three independently-evolving pieces:
 
-- **`kubectl-nm` CLI** — does plain API-server writes (`NodeMaintenance`
-  CRs, the script ConfigMap, paused-flag patches). It never talks to the
-  controller directly; it only mutates the desired state. See
-  [cli.md](./cli.md) for the full reference.
+- **`kubectl-nm` CLI** — does plain API-server writes against
+  `NodeMaintenance` CRs only (script body lives on `spec.script.inline`,
+  pause/run patches on `spec.paused`). The CLI never writes ConfigMaps
+  in `ko-system`; the controller materializes them. See
+  [cli.md](./cli.md) for the full reference and
+  [security.md](./security.md) for the trust boundary.
 - **`ko-controller`** — a controller-runtime manager watching
   `NodeMaintenance`. The reconciler is intentionally thin; it delegates one
   **Step** to the orchestrator per reconcile.
@@ -92,25 +95,35 @@ sequenceDiagram
     R->>API: Get nm
     alt nm terminal (Completed/Failed)
         R-->>API: nothing to do
-    else nm paused
-        R-->>API: Result{RequeueAfter: 15s}
     else
-        R->>O: Step(ctx, nm)
-        Note over O: initStatus<br/>(first reconcile only)
-        O->>API: List nodes (selector/all)
-        Note over O: admit Pending → InProgress<br/>(respects maxUnavailable / atOnce)
-        loop for each InProgress node
-            O->>O: idx = len(CompletedActions)
-            O->>API: Get Node
-            O->>A: Execute(ctx, nm, node, ns, spec)
-            A->>K: Patch / Evict / Create Pod
-            A-->>O: nil (advance) or error (fail node)
-            O->>O: Append action to CompletedActions<br/>or mark node Failed
+        opt status empty (first reconcile)
+            R->>O: Init(ctx, nm)
+            Note over O: initStatus<br/>resolveNodes → seed Pending<br/>stamp Phase / Targets / StartTime
+            R->>API: Status().Update(nm)
+            R-->>API: Result{Requeue: true}
         end
-        Note over O: rollup<br/>per-node phases → run phase<br/>+ status.summary counts
-        O-->>R: requeue?
-        R->>API: Status().Update(nm)
-        R-->>API: Result{RequeueAfter: 10s}
+        opt spec.script != nil
+            R->>API: EnsureScriptConfigMap<br/>(nm-<name>-script in ko-system)
+            Note over R: idempotent; runs even when paused<br/>so the CM is inspectable pre-launch
+        end
+        alt nm paused
+            R-->>API: Result{RequeueAfter: 15s}
+        else
+            R->>O: Step(ctx, nm)
+            Note over O: admit Pending → InProgress<br/>(respects maxUnavailable / atOnce)
+            loop for each InProgress node
+                O->>O: idx = len(CompletedActions)
+                O->>API: Get Node
+                O->>A: Execute(ctx, nm, node, ns, spec)
+                A->>K: Patch / Evict / Create Pod
+                A-->>O: nil (advance) or error (fail node)
+                O->>O: Append action to CompletedActions<br/>or mark node Failed
+            end
+            Note over O: rollup<br/>per-node phases → run phase<br/>+ status.summary counts
+            O-->>R: requeue?
+            R->>API: Status().Update(nm)
+            R-->>API: Result{RequeueAfter: 10s}
+        end
     end
 ```
 

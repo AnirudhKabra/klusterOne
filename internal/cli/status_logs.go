@@ -207,15 +207,6 @@ func streamPodLogs(ctx context.Context, c *Clients, ns, name string, follow bool
 	return err
 }
 
-// scriptCMRefFromUnstructured pulls (name, namespace, key) out of
-// spec.script.configMapRef on the unstructured NM object.
-func scriptCMRefFromUnstructured(u *unstructured.Unstructured) (name, namespace, key string, err error) {
-	name, _, _ = unstructured.NestedString(u.Object, "spec", "script", "configMapRef", "name")
-	namespace, _, _ = unstructured.NestedString(u.Object, "spec", "script", "configMapRef", "namespace")
-	key, _, _ = unstructured.NestedString(u.Object, "spec", "script", "configMapRef", "key")
-	return name, namespace, key, nil
-}
-
 func orDash(s string) string {
 	if s == "" {
 		return "-"

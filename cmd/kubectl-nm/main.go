@@ -4,7 +4,7 @@
 // Subcommands:
 //
 //	kubectl nm create <name> [flags]            build & apply a NodeMaintenance
-//	kubectl nm attach <name> <script>           update the script ConfigMap for an existing NM
+//	kubectl nm attach <name> <script>           patch spec.script.inline on an existing NM
 //	kubectl nm pause  <name> [--reason TEXT]    pause an in-flight NM
 //	kubectl nm run    <name>                    unpause an existing NM
 //	kubectl nm status <name>                    pretty-print phase + per-node table

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -45,7 +44,7 @@ func RunCreate(ctx context.Context, args []string) error {
 		dryRun         bool
 		outputYAML     bool
 	)
-	fs.StringVar(&scriptPath, "script", "", "Path to a script file (creates a ConfigMap).")
+	fs.StringVar(&scriptPath, "script", "", "Path to a script file; body is placed in spec.script.inline on the NM.")
 	fs.StringVar(&inline, "inline", "", "Inline script body (mutually exclusive with --script).")
 	fs.BoolVar(&allNodes, "all-nodes", false, "Target every node in the cluster.")
 	fs.BoolVar(&atOnce, "at-once", false, "Run on all targeted nodes in parallel.")
@@ -103,6 +102,12 @@ func RunCreate(ctx context.Context, args []string) error {
 		}
 		scriptBody = string(b)
 	}
+	if len(scriptBody) > maxInlineScriptBytes {
+		return fmt.Errorf("script too large: %d bytes (limit %d). "+
+			"Inline scripts must fit in a single ConfigMap; "+
+			"split the work across multiple NMs or fetch a larger payload from inside the script.",
+			len(scriptBody), maxInlineScriptBytes)
+	}
 
 	nm := buildNM(name, scriptBody, image, timeout, paused, allNodes, atOnce,
 		maxUnavailable, selector, nodes, includeCordon, includeDrain, includeUncord, inPod)
@@ -115,7 +120,20 @@ func RunCreate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return applyNM(ctx, clients, nm)
+	if err := applyNM(ctx, clients, nm); err != nil {
+		return err
+	}
+
+	// Hint at the rest of the two-phase workflow when the user opted into
+	// it. `kubectl nm run` will refuse to start an NM with no script, so
+	// this is also a reminder to attach before running.
+	if paused && scriptBody == "" {
+		fmt.Printf("  next: kubectl nm attach %s <script-path>\n", name)
+		fmt.Printf("        kubectl nm run    %s\n", name)
+	} else if paused {
+		fmt.Printf("  next: kubectl nm run %s   # NM is paused\n", name)
+	}
+	return nil
 }
 
 // buildNM constructs the typed NodeMaintenance object. Defaults for action
@@ -221,48 +239,27 @@ func writeYAML(w io.Writer, obj runtime.Object) error {
 	return err
 }
 
-// applyNM creates the NodeMaintenance (or updates it if it already exists)
-// and ensures the backing ConfigMap exists with the script body. The CLI
-// always uses an *external* ConfigMap rather than the inline path so that
-// `kubectl nm attach` can later overwrite it without touching the CR.
+// applyNM creates the NodeMaintenance (or updates it if it already exists).
+//
+// The script body lives in spec.script.inline on the CR. The controller
+// materializes the backing ConfigMap on its first reconcile pass — the CLI
+// never touches ConfigMaps in ko-system, so an operator only needs RBAC on
+// nodemaintenances.ko.io to create runs. That closes the silent-tamper
+// vector where anyone with configmaps.update on ko-system could rewrite a
+// script after the NM was authored. The companion ValidatingAdmissionPolicy
+// in config/admission/configmap_lockdown.yaml enforces the other half: in
+// ko-system, only the controller's ServiceAccount may CREATE/UPDATE/DELETE
+// ConfigMaps at all (plus root-ca-cert-publisher for kube-root-ca.crt).
 func applyNM(ctx context.Context, c *Clients, nm *kov1alpha1.NodeMaintenance) error {
-	// Always use the canonical runner namespace. The annotation is still
-	// emitted for the controller's benefit but is no longer user-tunable.
-	runnerNS := RunnerNamespace
-
-	if err := ensureNamespace(ctx, c, runnerNS); err != nil {
-		return fmt.Errorf("ensure namespace %s: %w", runnerNS, err)
-	}
-
-	cmName := fmt.Sprintf("nm-%s-script", nm.Name)
-	body := ""
-	if nm.Spec.Script != nil {
-		body = nm.Spec.Script.Inline
-	}
-	if err := upsertScriptConfigMap(ctx, c, runnerNS, cmName, nm.Name, body); err != nil {
-		return fmt.Errorf("upsert script configmap: %w", err)
-	}
-
-	// Now flip the spec to reference the ConfigMap instead of inlining the
-	// script, then push the CR.
-	if nm.Spec.Script != nil {
-		nm.Spec.Script.Inline = ""
-		nm.Spec.Script.ConfigMapRef = &kov1alpha1.ScriptConfigMapRef{
-			Name: cmName,
-		}
-	}
-
 	u, err := toUnstructured(nm)
 	if err != nil {
 		return err
 	}
 
-	var live *unstructured.Unstructured
 	existing, getErr := c.Dyn.Resource(NodeMaintenanceGVR).Get(ctx, nm.Name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(getErr):
-		live, err = c.Dyn.Resource(NodeMaintenanceGVR).Create(ctx, u, metav1.CreateOptions{})
-		if err != nil {
+		if _, err := c.Dyn.Resource(NodeMaintenanceGVR).Create(ctx, u, metav1.CreateOptions{}); err != nil {
 			return fmt.Errorf("create NodeMaintenance: %w", err)
 		}
 		fmt.Printf("nodemaintenance.ko.io/%s created\n", nm.Name)
@@ -270,15 +267,10 @@ func applyNM(ctx context.Context, c *Clients, nm *kov1alpha1.NodeMaintenance) er
 		return fmt.Errorf("get NodeMaintenance: %w", getErr)
 	default:
 		u.SetResourceVersion(existing.GetResourceVersion())
-		live, err = c.Dyn.Resource(NodeMaintenanceGVR).Update(ctx, u, metav1.UpdateOptions{})
-		if err != nil {
+		if _, err := c.Dyn.Resource(NodeMaintenanceGVR).Update(ctx, u, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update NodeMaintenance: %w", err)
 		}
 		fmt.Printf("nodemaintenance.ko.io/%s updated\n", nm.Name)
-	}
-
-	if err := setConfigMapOwner(ctx, c, runnerNS, cmName, live); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: configmap/%s ownerReferences not set (CM will not be garbage-collected with the NM): %v\n", cmName, err)
 	}
 	return nil
 }
@@ -299,75 +291,3 @@ func toUnstructured(obj runtime.Object) (*unstructured.Unstructured, error) {
 	return u, nil
 }
 
-func ensureNamespace(ctx context.Context, c *Clients, ns string) error {
-	_, err := c.Kube.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
-	if err == nil {
-		return nil
-	}
-	if !apierrors.IsNotFound(err) {
-		return err
-	}
-	_, err = c.Kube.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: ns},
-	}, metav1.CreateOptions{})
-	if apierrors.IsAlreadyExists(err) {
-		return nil
-	}
-	return err
-}
-
-func upsertScriptConfigMap(ctx context.Context, c *Clients, ns, name, owner, body string) error {
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-			Labels:    map[string]string{"ko.io/owner": owner},
-		},
-		Data: map[string]string{"script.sh": body},
-	}
-	_, err := c.Kube.CoreV1().ConfigMaps(ns).Create(ctx, cm, metav1.CreateOptions{})
-	if apierrors.IsAlreadyExists(err) {
-		existing, gerr := c.Kube.CoreV1().ConfigMaps(ns).Get(ctx, name, metav1.GetOptions{})
-		if gerr != nil {
-			return gerr
-		}
-		existing.Data = cm.Data
-		existing.Labels = cm.Labels
-		_, err = c.Kube.CoreV1().ConfigMaps(ns).Update(ctx, existing, metav1.UpdateOptions{})
-	}
-	return err
-}
-
-// setConfigMapOwner ensures the script ConfigMap carries an ownerReference to
-// the owning NodeMaintenance, so Kubernetes garbage-collects it whenever the
-// NM is deleted. Cluster-scoped owner + namespaced dependent is an
-// explicitly-supported direction.
-//
-// Idempotent: a no-op when the CM already references the live NM's UID. Also
-// safe for "old" CMs that pre-date this fix — the first time we touch them
-// (e.g. via kubectl nm attach), we'll backfill the ownerRef.
-func setConfigMapOwner(ctx context.Context, c *Clients, ns, cmName string, nm *unstructured.Unstructured) error {
-	if nm == nil || nm.GetUID() == "" {
-		return fmt.Errorf("owner NodeMaintenance has no UID")
-	}
-	cm, err := c.Kube.CoreV1().ConfigMaps(ns).Get(ctx, cmName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	desired := metav1.OwnerReference{
-		APIVersion: nm.GetAPIVersion(),
-		Kind:       nm.GetKind(),
-		Name:       nm.GetName(),
-		UID:        nm.GetUID(),
-	}
-	for _, r := range cm.OwnerReferences {
-		if r.UID == desired.UID {
-			return nil
-		}
-	}
-	cm.OwnerReferences = append(cm.OwnerReferences, desired)
-	if _, err := c.Kube.CoreV1().ConfigMaps(ns).Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
-		return err
-	}
-	return nil
-}

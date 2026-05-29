@@ -64,6 +64,7 @@ make undeploy
 |------------------------------------------------|--------------------------------------------------|
 | Hands-on cluster walkthrough                   | [docs/exploring.md](./docs/exploring.md)         |
 | Full `kubectl-nm` reference                    | [docs/cli.md](./docs/cli.md)                     |
+| Threat model + admission lockdown              | [docs/security.md](./docs/security.md)           |
 | Components & data flow                         | [docs/architecture.md](./docs/architecture.md)   |
 | Reconcile lifecycle (3-node walkthrough)       | [docs/reconcile-flow.md](./docs/reconcile-flow.md) |
 | How Script runs on the host                    | [docs/script-action.md](./docs/script-action.md) |

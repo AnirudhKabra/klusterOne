@@ -1,0 +1,159 @@
+# Locks ko-system down as a controller-private namespace for ConfigMaps.
+#
+# Background
+# ----------
+# The Script action runs `script.sh` from the runner ConfigMap as root
+# on the host (nsenter --target 1 in a privileged Pod with hostPID).
+# That CM lives in ko-system and is materialized by the controller from
+# spec.script.inline on the NM CR.
+#
+# Without this policy, anyone with configmaps.{create,update,delete} in
+# ko-system could plant or tamper with that CM and run arbitrary code
+# as root on every node — *without* any RBAC on nodemaintenances.ko.io.
+#
+# What this policy enforces
+# -------------------------
+# In ko-system every ConfigMap is controller-owned. Only four
+# principals may CREATE / UPDATE / DELETE ConfigMaps here — everyone
+# else (including cluster-admins on a normal kubeconfig) gets a hard
+# Deny:
+#
+#   1. ko-system:ko-controller-manager
+#        The controller. Materializes script CMs (from
+#        spec.script.inline) and output CMs (from runner Pod stdout).
+#
+#   2. kube-system:root-ca-cert-publisher
+#        kube-controller-manager subroutine that seeds kube-root-ca.crt
+#        into every namespace. Blocking it would break kubelet's CA
+#        distribution.
+#
+#   3. kube-system:generic-garbage-collector
+#        Kubernetes GC. Cascades ownerReference deletes — this is how
+#        `kubectl delete nm <name>` removes the backing
+#        `nm-<name>-script` CM after the NM is gone. Without this
+#        entry the script CM survives every NM (and remains in place
+#        to be reused by the next NM with the same name).
+#        Safe: GC only deletes dependents whose owner UID is absent,
+#        and CREATE is still blocked — attackers cannot plant the
+#        target.
+#
+#   4. kube-system:namespace-controller
+#        Cleans up every object inside a namespace when the namespace
+#        is deleted. Without this entry, `kubectl delete ns ko-system`
+#        hangs in `Terminating` forever. Deleting a namespace is
+#        already a cluster-admin operation, so this exemption grants
+#        no new privilege.
+#
+# The CLI never writes ConfigMaps in ko-system (the script body always
+# travels on spec.script.inline of the NM CR), so operators only need
+# RBAC on nodemaintenances.ko.io to run scripts.
+#
+# Why `kubectl auth can-i` says "yes" but the write still fails
+# -------------------------------------------------------------
+# `can-i` only checks the *authorization* layer (RBAC, Node, Webhook).
+# Cluster-admins (and anyone with broad ConfigMap RBAC) get "yes".
+# This VAP runs in the *admission* stage, on top of authorization, so
+# "yes" from `can-i` means "RBAC won't stop you" — not "the apiserver
+# will accept this write".
+#
+# To preflight a write that may hit this VAP, use a server-side
+# dry-run (it actually runs admission):
+#
+#   kubectl -n ko-system patch cm <name> --type=merge \
+#     -p '{...}' --dry-run=server
+#
+# Returns the same Forbidden you'd get on a real write — no mutation.
+#
+# Why namespace-wide, not label-scoped?
+# -------------------------------------
+# An earlier draft matched only CMs carrying `ko.io/owner` — the label
+# the controller stamps on its own CMs. Problem: a user with
+# configmaps.create in ko-system could still drop *unlabeled* CMs.
+#
+# With spec.script.configMapRef removed from the CRD, unlabeled CMs are
+# no longer weaponizable, but they're still clutter in a namespace that
+# should belong to the controller alone. Namespace-wide matches the
+# documented intent: ko-system is privileged Pod Security, no untrusted
+# workloads, treat-it-like-kube-system.
+#
+# Compatibility
+# -------------
+# Pick the VAP API version that matches your cluster:
+#
+#   k8s ≥ 1.30     admissionregistration.k8s.io/v1        (this file)
+#   k8s 1.28-1.29  admissionregistration.k8s.io/v1beta1
+#   k8s 1.26-1.27  admissionregistration.k8s.io/v1alpha1
+#   k8s < 1.26     no VAP — rely on CLI + tight RBAC; document
+#                  ko-system as privileged and do not bind broad
+#                  ConfigMap roles to humans there.
+#
+# Escape hatch
+# ------------
+# For emergency manual cleanup, cluster-admin can bypass with:
+#
+#   kubectl delete validatingadmissionpolicy ko-system-configmap-lockdown
+#
+# That permission is itself cluster-admin — the correct bar for an
+# override.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ko-system-configmap-lockdown
+  labels:
+    app.kubernetes.io/name: klusterone
+    app.kubernetes.io/component: ko-controller
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["configmaps"]
+    # Scope the policy to ko-system using the well-known label that the
+    # NamespaceDefaultLabelName admission plugin sets on every Namespace
+    # (kubernetes.io/metadata.name == <namespace name>). Beats hard-coding
+    # the namespace name in the binding because the policy is then
+    # self-describing.
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: ko-system
+  validations:
+    # Allowlist:
+    #   - ko-controller-manager        primary writer
+    #   - root-ca-cert-publisher       seeds kube-root-ca.crt
+    #   - generic-garbage-collector    cascades ownerRef deletes
+    #   - namespace-controller         cleans up on namespace delete
+    # See the header for why the kube-system three don't widen the
+    # attack surface.
+    - expression: |
+        request.userInfo.username == 'system:serviceaccount:ko-system:ko-controller-manager' ||
+        request.userInfo.username == 'system:serviceaccount:kube-system:root-ca-cert-publisher' ||
+        request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector' ||
+        request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller'
+      # Multi-line message: apiserver renders \n verbatim in the error
+      # body, so operators see a scannable list instead of a 1-line wall.
+      messageExpression: |
+        'ConfigMap ' + string(request.name) + ' in ko-system is controller-private.\n'
+        + '  - Allowed writers: ko-controller-manager (primary); kube-system GC, '
+        + 'namespace-controller, root-ca-cert-publisher (system cleanup).\n'
+        + '  - To change a script: kubectl nm attach <nm> <path>  '
+        + '(patches spec.script.inline on the NM CR; auditable, bumps generation).\n'
+        + '  - To preflight a direct write here: append --dry-run=server  '
+        + '(runs admission without mutating state).'
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ko-system-configmap-lockdown
+  labels:
+    app.kubernetes.io/name: klusterone
+    app.kubernetes.io/component: ko-controller
+spec:
+  policyName: ko-system-configmap-lockdown
+  # Hard Deny — the whole point of this policy is to block tampering.
+  # To stage a rollout in observe-only mode first, flip to
+  # `[Warn, Audit]`, confirm no legitimate principals show up in the
+  # apiserver audit log, then switch back to `[Deny]`.
+  validationActions: [Deny]

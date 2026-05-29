@@ -6,8 +6,11 @@ spec:
   paused: false
   allNodes: true
   script:
-    configMapRef:
-      name: nm-example-script-script
+    inline: |
+      #!/bin/sh
+      set -eu
+      echo "$GREETING from $NODE_NAME at $(date -u +%FT%TZ)"
+      uname -a
     image: alpine:3.19
     timeoutSeconds: 600
     runOnHost: true
@@ -20,15 +23,3 @@ spec:
     - type: Cordon
     - type: Script
     - type: Uncordon
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: nm-example-script-script
-  namespace: ko-system
-data:
-  script.sh: |
-    #!/bin/sh
-    set -eu
-    echo "$GREETING from $NODE_NAME at $(date -u +%FT%TZ)"
-    uname -a

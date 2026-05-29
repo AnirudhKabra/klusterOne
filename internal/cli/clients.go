@@ -26,11 +26,15 @@ var NodeMaintenanceGVR = schema.GroupVersionResource{
 	Resource: "nodemaintenances",
 }
 
-// RunnerNamespace is where the controller spawns runner Pods and where the
-// CLI creates the backing script ConfigMaps. It is a fixed convention; the
-// controller's `runnerNamespace` constant (cmd/manager/main.go) is the
-// matching half. The namespace must be labelled to allow privileged Pod
-// Security — the runner Pod is privileged + hostPID/hostNetwork/hostIPC.
+// RunnerNamespace is where the controller spawns runner Pods and
+// materializes the backing script ConfigMaps from spec.script.inline. The
+// CLI only *reads* from this namespace (e.g. `kubectl nm pull` fetches the
+// output CM written by the controller); it never creates or mutates
+// ConfigMaps here — see docs/security.md. The controller's
+// `runnerNamespace` constant (cmd/manager/main.go) is the matching half.
+// The namespace must be labelled to allow privileged Pod Security — the
+// runner Pod is privileged + hostPID (we deliberately do not request
+// hostNetwork or hostIPC; nsenter setns()-es into those at runtime).
 const RunnerNamespace = "ko-system"
 
 // newClients resolves kubeconfig the same way kubectl does

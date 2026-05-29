@@ -113,7 +113,6 @@ func RunPush(ctx context.Context, args []string) error {
 
 	return runCopyNM(ctx, copyRunSpec{
 		nmName:     nmName,
-		namespace:  RunnerNamespace,
 		script:     script,
 		allNodes:   allNodes,
 		selector:   selector,
@@ -186,7 +185,7 @@ func RunPull(ctx context.Context, args []string) error {
 	outputCM := fmt.Sprintf("nm-%s-output", nmName)
 	anns := map[string]string{"ko.io/output-configmap": outputCM}
 
-	if err := createCopyNM(ctx, clients, nmName, RunnerNamespace, script, false, "", node, int64(timeout/time.Second), anns); err != nil {
+	if err := createCopyNM(ctx, clients, nmName, script, false, "", node, int64(timeout/time.Second), anns); err != nil {
 		return err
 	}
 	fmt.Printf("nodemaintenance.ko.io/%s created (pull %s:%s → %s)\n", nmName, node, remotePath, localPath)
@@ -232,7 +231,6 @@ func RunPull(ctx context.Context, args []string) error {
 // the steps inline because it has to fetch logs in between.
 type copyRunSpec struct {
 	nmName     string
-	namespace  string
 	script     string
 	allNodes   bool
 	selector   string
@@ -248,7 +246,7 @@ func runCopyNM(ctx context.Context, s copyRunSpec) error {
 	if err != nil {
 		return err
 	}
-	if err := createCopyNM(ctx, clients, s.nmName, s.namespace, s.script, s.allNodes, s.selector, s.nodesCSV, int64(s.timeout/time.Second), nil); err != nil {
+	if err := createCopyNM(ctx, clients, s.nmName, s.script, s.allNodes, s.selector, s.nodesCSV, int64(s.timeout/time.Second), nil); err != nil {
 		return err
 	}
 	fmt.Printf("nodemaintenance.ko.io/%s created (%s)\n", s.nmName, s.announce)
@@ -270,31 +268,24 @@ func runCopyNM(ctx context.Context, s copyRunSpec) error {
 	return nil
 }
 
-func createCopyNM(ctx context.Context, c *Clients, name, namespace, script string, allNodes bool, selector, nodesCSV string, timeoutSec int64, extraAnnotations map[string]string) error {
-	if err := ensureNamespace(ctx, c, namespace); err != nil {
-		return fmt.Errorf("ensure namespace %s: %w", namespace, err)
-	}
-	cmName := fmt.Sprintf("nm-%s-script", name)
-	if err := upsertScriptConfigMap(ctx, c, namespace, cmName, name, script); err != nil {
-		return fmt.Errorf("upsert script configmap: %w", err)
-	}
-
+// createCopyNM builds and submits a one-shot NodeMaintenance with the script
+// body inlined into spec.script.inline. The controller materializes the
+// backing ConfigMap on its first reconcile pass; the CLI never touches
+// ConfigMaps in ko-system, so push/pull users only need write access to
+// nodemaintenances.ko.io.
+func createCopyNM(ctx context.Context, c *Clients, name, script string, allNodes bool, selector, nodesCSV string, timeoutSec int64, extraAnnotations map[string]string) error {
 	nm := buildCopyNM(name, allNodes, selector, nodesCSV, timeoutSec, extraAnnotations)
-	nm.Spec.Script.ConfigMapRef = &kov1alpha1.ScriptConfigMapRef{Name: cmName}
+	nm.Spec.Script.Inline = script
 
 	u, err := toUnstructured(nm)
 	if err != nil {
 		return err
 	}
-	live, err := c.Dyn.Resource(NodeMaintenanceGVR).Create(ctx, u, metav1.CreateOptions{})
-	if err != nil {
+	if _, err := c.Dyn.Resource(NodeMaintenanceGVR).Create(ctx, u, metav1.CreateOptions{}); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("a NodeMaintenance named %q already exists; pass --name to override", name)
 		}
 		return fmt.Errorf("create NodeMaintenance: %w", err)
-	}
-	if err := setConfigMapOwner(ctx, c, namespace, cmName, live); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: configmap/%s ownerReferences not set (CM will not be garbage-collected with the NM): %v\n", cmName, err)
 	}
 	return nil
 }

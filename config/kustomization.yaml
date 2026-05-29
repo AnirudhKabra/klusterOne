@@ -1,7 +1,12 @@
 # Top-level kustomization. Order is the natural dependency order:
-#   1. manager   — creates the ko-system Namespace and the controller Deployment
-#   2. crd       — installs the NodeMaintenance CRD
-#   3. rbac      — ServiceAccount + (Cluster)Role + (Cluster)RoleBinding
+#   1. manager    — creates the ko-system Namespace and the controller Deployment
+#   2. crd        — installs the NodeMaintenance CRD
+#   3. rbac       — ServiceAccount + (Cluster)Role + (Cluster)RoleBinding
+#   4. admission  — ValidatingAdmissionPolicy locking down all ConfigMap
+#                   CREATE/UPDATE/DELETE in ko-system to the controller SA
+#                   (plus root-ca-cert-publisher for kube-root-ca.crt). See
+#                   docs/security.md. Requires Kubernetes 1.30+; remove this
+#                   entry on older clusters and rely on tight ko-system RBAC.
 #
 # Override the controller image at deploy time:
 #
@@ -15,6 +20,7 @@ resources:
 - manager
 - crd
 - rbac
+- admission
 
 images:
 - name: ko-controller

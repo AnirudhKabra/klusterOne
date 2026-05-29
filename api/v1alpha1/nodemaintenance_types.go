@@ -79,17 +79,20 @@ type NodeMaintenanceSpec struct {
 }
 
 // ScriptSpec describes a single user-supplied script to execute on each
-// target node. Exactly one of Inline or ConfigMapRef should be set; if both
-// are set, ConfigMapRef wins.
+// target node.
+//
+// The script body lives on Inline. The controller materializes it into a
+// ConfigMap named "nm-<nm-name>-script" in the runner namespace; that CM
+// is then mounted into the runner Pod. There is no escape hatch to point
+// at a user-managed ConfigMap — that path used to exist and was removed
+// in favor of an audit-friendly, admission-policy-enforceable boundary
+// where only the controller's ServiceAccount can ever write script CMs.
+// See docs/security.md.
 type ScriptSpec struct {
-	// Inline is the script body. When set, the controller materializes it
-	// into a ConfigMap named "nm-<nm-name>-script" in the runner namespace.
+	// Inline is the script body. The controller materializes it into a
+	// ConfigMap named "nm-<nm-name>-script" in the runner namespace.
 	// +optional
 	Inline string `json:"inline,omitempty"`
-
-	// ConfigMapRef points at a pre-existing ConfigMap holding the script.
-	// +optional
-	ConfigMapRef *ScriptConfigMapRef `json:"configMapRef,omitempty"`
 
 	// Image is the runner container image. Defaults to "alpine:3.19".
 	// +optional
@@ -109,17 +112,6 @@ type ScriptSpec struct {
 	// Env is a list of name/value pairs passed to the script's environment.
 	// +optional
 	Env []EnvVar `json:"env,omitempty"`
-}
-
-// ScriptConfigMapRef references the ConfigMap entry that contains the script.
-// The ConfigMap is always read from the controller's runner namespace — Pods
-// can only mount ConfigMaps from their own namespace, and the runner Pod is
-// created in that namespace.
-type ScriptConfigMapRef struct {
-	Name string `json:"name"`
-	// Key defaults to "script.sh" when empty.
-	// +optional
-	Key string `json:"key,omitempty"`
 }
 
 // EnvVar is a simple name/value pair passed into the runner Pod.
