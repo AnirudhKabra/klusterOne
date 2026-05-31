@@ -12,6 +12,7 @@ top-level [README](../README.md). This folder is the deep-dive index.
 | Reconcile lifecycle deep dive (3-node walkthrough) | [reconcile-flow.md](./reconcile-flow.md) |
 | How the Script action runs on the host         | [script-action.md](./script-action.md) |
 | Full CRD spec + codegen workflow               | [crd-reference.md](./crd-reference.md) |
+| Go struct graph + Mermaid diagrams of the API types | [types-map.md](./types-map.md) |
 | Hands-on `kubectl` cheat sheet + minikube loop | [exploring.md](./exploring.md) |
 
 ## Suggested reading order
@@ -23,9 +24,10 @@ top-level [README](../README.md). This folder is the deep-dive index.
    tick-by-tick for a concrete 3-node run, including the budget math.
 3. **[cli.md](./cli.md)** — reference for every flag and workflow once you
    know the underlying model.
-4. **[script-action.md](./script-action.md)** and
-   **[crd-reference.md](./crd-reference.md)** — pick up as needed when
-   writing scripts or evolving the CRD spec.
+4. **[script-action.md](./script-action.md)**,
+   **[crd-reference.md](./crd-reference.md)**, and
+   **[types-map.md](./types-map.md)** — pick up as needed when writing
+   scripts, evolving the CRD spec, or navigating the Go type graph.
 5. **[exploring.md](./exploring.md)** — `kubectl` / `kubectl-nm` / minikube
    cheat sheet for verifying the install, running a sample, and debugging
    live runs. Day-to-day operations reference rather than design doc.
