@@ -12,7 +12,7 @@ in `ko-system`) on reconcile. **The CLI never writes ConfigMaps directly.**
 
 That means:
 
-- Operators only need `nodemaintenances.ko.io` RBAC to run scripts —
+- Operators only need `nodemaintenances.ko.io` RBAC to run scripts -
   no `configmaps.update / patch / delete` in `ko-system`.
 - Every change to a script is a `spec` mutation on the CR: it bumps
   `metadata.generation` and shows up in the kube-apiserver audit log.
@@ -27,7 +27,7 @@ including cluster-admins acting through a normal kubeconfig, gets
 
 | Service account                                    | Why it's exempt                                         |
 |----------------------------------------------------|---------------------------------------------------------|
-| `ko-system:ko-controller-manager`                  | Primary writer — materializes script + output CMs.      |
+| `ko-system:ko-controller-manager`                  | Primary writer - materializes script + output CMs.      |
 | `kube-system:root-ca-cert-publisher`               | Seeds `kube-root-ca.crt` into every namespace.          |
 | `kube-system:generic-garbage-collector`            | Cascades ownerRef deletes (cleans up CMs when their NM is gone). |
 | `kube-system:namespace-controller`                 | Cleans up objects inside a namespace on `kubectl delete ns`. |
@@ -40,7 +40,7 @@ DELETE is Forbidden); without `namespace-controller`,
 `kubectl delete ns ko-system` hangs in `Terminating` forever.
 
 Neither widens the attack surface. GC only deletes dependents whose
-owner UID is already absent, and CREATE is still blocked — so an
+owner UID is already absent, and CREATE is still blocked - so an
 attacker can't plant a CM with a forged owner to make GC delete
 something it shouldn't. Deleting a namespace is itself a cluster-admin
 operation, so the namespace-controller exemption grants no new
@@ -55,7 +55,7 @@ controller-only at admission.
 
 `kubectl auth can-i` only checks the *authorization* layer (RBAC,
 Node, Webhook). A cluster-admin will get `yes` for `create/update/delete
-configmaps -n ko-system` — but the write itself will still be Forbidden
+configmaps -n ko-system` - but the write itself will still be Forbidden
 by this VAP, which runs in the *admission* layer on top.
 
 To preflight a write that might be VAP-gated, use server-side dry-run
@@ -69,7 +69,7 @@ kubectl -n ko-system patch cm <name> --type=merge \
 ## The threat this closes
 
 Without this setup, anyone with `configmaps.update` on `ko-system` could
-silently swap a script that a privileged operator is about to run — with
+silently swap a script that a privileged operator is about to run - with
 zero RBAC on `NodeMaintenance`. That's a fleet-wide root-on-host
 privilege escalation behind an obscure namespace permission.
 
@@ -86,7 +86,7 @@ privilege escalation behind an obscure namespace permission.
 
 ```bash
 # Any ConfigMap create in ko-system, by any non-controller principal,
-# should be rejected — labeled or not.
+# should be rejected - labeled or not.
 kubectl -n ko-system create configmap evil \
   --from-literal=note='this should never succeed'
 # → Error from server (Forbidden): ko-system-configmap-lockdown ...
@@ -100,11 +100,11 @@ If the first command succeeds, the policy isn't installed:
 `kubectl get validatingadmissionpolicy ko-system-configmap-lockdown`.
 
 `kube-root-ca.crt` is the one CM that legitimately gets *created* in
-`ko-system` by something other than the controller — published by
+`ko-system` by something other than the controller - published by
 `kube-system:root-ca-cert-publisher`, which the policy allowlists
 explicitly. `kubectl -n ko-system get configmap kube-root-ca.crt`
 should resolve normally on any cluster.
 
 Deletes by `kube-system:generic-garbage-collector` are similarly
-expected — that's how `kubectl delete nm <name>` cascades cleanup to
+expected - that's how `kubectl delete nm <name>` cascades cleanup to
 the backing `nm-<name>-script` ConfigMap.

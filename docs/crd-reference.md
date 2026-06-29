@@ -22,7 +22,7 @@ spec:
       echo "patching $NODE_NAME"
     image: alpine:3.19              # default
     timeoutSeconds: 600
-    runOnHost: true                 # default — nsenter into PID 1
+    runOnHost: true                 # default - nsenter into PID 1
     env:
       - { name: GREETING, value: hello }
   strategy:
@@ -62,15 +62,15 @@ during a run, see [reconcile-flow.md](./reconcile-flow.md).
 
 The orchestrator resolves targets in this priority order; only one wins:
 
-1. `spec.allNodes: true` — every Node in the cluster, label-selectorless.
-2. `spec.nodeNames: [...]` — the explicit list, sorted lexicographically
+1. `spec.allNodes: true` - every Node in the cluster, label-selectorless.
+2. `spec.nodeNames: [...]` - the explicit list, sorted lexicographically
    so reconciles are deterministic.
-3. `spec.nodeSelector: {k: v, ...}` — every Node matching the (AND-ed)
+3. `spec.nodeSelector: {k: v, ...}` - every Node matching the (AND-ed)
    selector, also sorted.
 
 Resolution happens **once**, at the first reconcile of the run, and the
 result is frozen into `status.nodes[]`. Nodes added or removed from the
-cluster mid-run do not change the target set — restart the NM if you need
+cluster mid-run do not change the target set - restart the NM if you need
 to re-resolve.
 
 `spec.actions` defaults to `[Cordon, Script, Uncordon]` when omitted and a
@@ -83,9 +83,9 @@ entirely.
 When you add or change a field in `api/v1alpha1/nodemaintenance_types.go`,
 two artifacts have to be regenerated in lockstep with the Go types:
 
-- `api/v1alpha1/zz_generated.deepcopy.go` — `DeepCopy*` methods the
+- `api/v1alpha1/zz_generated.deepcopy.go` - `DeepCopy*` methods the
   controller needs to compile.
-- `config/crd/ko.io_nodemaintenances.yaml` — the cluster-side schema (the
+- `config/crd/ko.io_nodemaintenances.yaml` - the cluster-side schema (the
   API server silently drops fields not declared here).
 
 Both are produced from kubebuilder markers
@@ -93,7 +93,7 @@ Both are produced from kubebuilder markers
 Go types via `controller-gen`.
 
 ```bash
-# 1. Edit api/v1alpha1/nodemaintenance_types.go — add the field and any markers
+# 1. Edit api/v1alpha1/nodemaintenance_types.go - add the field and any markers
 #    (e.g. +kubebuilder:validation:Minimum=1, +kubebuilder:validation:Enum=...).
 
 # 2. Regenerate the deepcopy methods.
@@ -119,14 +119,14 @@ Adding a new action (say `Reboot`) is three edits:
    (e.g. `ActionReboot ActionType = "Reboot"`) and any nested
    `*Options` struct it needs in `ActionSpec`.
 2. Implement the action in `internal/actions/` (a struct with `Name()` and
-   `Execute()` per the `Action` interface) — see existing `cordon.go` as
+   `Execute()` per the `Action` interface) - see existing `cordon.go` as
    a minimal example.
 3. Wire it into the registry in `cmd/manager/main.go`:
    ```go
    registry.Register(kov1alpha1.ActionReboot, &actions.Reboot{...})
    ```
 
-The orchestrator picks up the new type automatically — it does a registry
+The orchestrator picks up the new type automatically - it does a registry
 lookup keyed on `spec.Type`, so no orchestrator change is needed. After
 the registration, run `make generate manifests install-crd build` to
 ship the new type to the cluster.

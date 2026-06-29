@@ -2,7 +2,7 @@
 
 A hands-on cheat sheet for verifying an install, running a sample, observing
 what the controller does node-by-node, and iterating on the controller image.
-Assumes the controller has been deployed via `make deploy` — see the
+Assumes the controller has been deployed via `make deploy` - see the
 [top-level README](../README.md) for install.
 
 ## 1. Verify the install
@@ -75,17 +75,17 @@ The runner pod's name is recorded in `status.nodes[*].scriptPodName`, so
 | Pause       | `kubectl nm pause <name> [--reason]` | `kubectl patch nm <name> --type=merge -p '{"spec":{"paused":true}}'`   |
 | Resume      | `kubectl nm run <name>`              | `kubectl patch nm <name> --type=merge -p '{"spec":{"paused":false}}'`  |
 | Swap script | `kubectl nm attach <name> <path>`    | `kubectl patch nm <name> --type=merge -p '{"spec":{"script":{"inline":"<body>"}}}'` |
-| Edit spec   | —                                    | `kubectl edit nm <name>`                                               |
-| Delete      | —                                    | `kubectl delete nm <name>`                                             |
+| Edit spec   | -                                    | `kubectl edit nm <name>`                                               |
+| Delete      | -                                    | `kubectl delete nm <name>`                                             |
 
-`pause` is a fence between actions, not an interrupt — a Script Pod already
+`pause` is a fence between actions, not an interrupt - a Script Pod already
 running on a node finishes first. See
 [cli.md → Halting an in-flight run](./cli.md#halting-an-in-flight-run).
 
 ## 5. Iterate on the controller image (minikube)
 
 `make docker` compiles `bin/ko-controller` on the host first, then assembles
-a distroless runtime image around it — so `docker build` does not need
+a distroless runtime image around it - so `docker build` does not need
 network access to pull a Go builder or download modules.
 
 ```bash

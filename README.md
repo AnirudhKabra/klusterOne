@@ -1,15 +1,15 @@
 # klusterOne (`ko-controller`)
 
 A Kubernetes operator + `kubectl` plugin for running an operator-supplied
-script on a set of nodes — safely. Each run is a `NodeMaintenance` (`nm`)
+script on a set of nodes - safely. Each run is a `NodeMaintenance` (`nm`)
 custom resource: pick the script, pick the nodes, pick a rollout budget, and
 the controller handles cordon → script → uncordon for you.
 
 ## What's in the box
 
 - **CRD** `nodemaintenances.ko.io` (cluster-scoped, short name `nm`)
-- **Controller** `ko-controller` — reconciles NM objects
-- **CLI** `kubectl-nm` — `create`, `attach`, `pause`, `run`, `status`, `logs`
+- **Controller** `ko-controller` - reconciles NM objects
+- **CLI** `kubectl-nm` - `create`, `attach`, `pause`, `run`, `status`, `logs`
 
 ## Quickstart
 
@@ -37,7 +37,7 @@ kubectl nm attach write-name ./scripts/test-script.sh
 kubectl nm run    write-name
 ```
 
-`--paused` defers the script — `attach` swaps it in, `run` kicks off the
+`--paused` defers the script - `attach` swaps it in, `run` kicks off the
 rollout. This is the recommended workflow because it lets you author and
 re-author the script without recreating the NM. Pass `--script PATH` to
 `create` directly if you prefer a one-shot.

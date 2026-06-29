@@ -8,6 +8,7 @@ top-level [README](../README.md). This folder is the deep-dive index.
 | Topic                                          | Page |
 |-----------------------------------------------|------|
 | Components & data flow (CLI ↔ controller ↔ CRD) | [architecture.md](./architecture.md) |
+| API request lifecycle: `kubectl apply` → endpoint discovery → Scheme decode | [api-request-lifecycle.md](./api-request-lifecycle.md) |
 | Full `kubectl-nm` reference                    | [cli.md](./cli.md) |
 | Reconcile lifecycle deep dive (3-node walkthrough) | [reconcile-flow.md](./reconcile-flow.md) |
 | How the Script action runs on the host         | [script-action.md](./script-action.md) |
@@ -17,17 +18,17 @@ top-level [README](../README.md). This folder is the deep-dive index.
 
 ## Suggested reading order
 
-1. **[architecture.md](./architecture.md)** — get the high-level picture of
+1. **[architecture.md](./architecture.md)** - get the high-level picture of
    the three pieces (CLI, controller, action registry) and the two
    invariants that govern the orchestrator.
-2. **[reconcile-flow.md](./reconcile-flow.md)** — see exactly what happens
+2. **[reconcile-flow.md](./reconcile-flow.md)** - see exactly what happens
    tick-by-tick for a concrete 3-node run, including the budget math.
-3. **[cli.md](./cli.md)** — reference for every flag and workflow once you
+3. **[cli.md](./cli.md)** - reference for every flag and workflow once you
    know the underlying model.
 4. **[script-action.md](./script-action.md)**,
    **[crd-reference.md](./crd-reference.md)**, and
-   **[types-map.md](./types-map.md)** — pick up as needed when writing
+   **[types-map.md](./types-map.md)** - pick up as needed when writing
    scripts, evolving the CRD spec, or navigating the Go type graph.
-5. **[exploring.md](./exploring.md)** — `kubectl` / `kubectl-nm` / minikube
+5. **[exploring.md](./exploring.md)** - `kubectl` / `kubectl-nm` / minikube
    cheat sheet for verifying the install, running a sample, and debugging
    live runs. Day-to-day operations reference rather than design doc.

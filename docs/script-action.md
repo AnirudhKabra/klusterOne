@@ -15,19 +15,19 @@ it, see [architecture.md](./architecture.md) and
 For each in-flight node, the controller materializes a privileged runner
 Pod with:
 
-- `spec.nodeName: <target>` — bypasses the scheduler. This is important
+- `spec.nodeName: <target>` - bypasses the scheduler. This is important
   because the node is already cordoned by the time `Script` runs, and a
   scheduled Pod would refuse to land on it.
-- `tolerations: [{operator: Exists}]` — so it lands on tainted/cordoned
+- `tolerations: [{operator: Exists}]` - so it lands on tainted/cordoned
   nodes regardless of what's on them.
-- `hostPID: true` — set when `runOnHost: true` (default). This is the
+- `hostPID: true` - set when `runOnHost: true` (default). This is the
   *only* host namespace the Pod spec opts into. `nsenter --target 1`
   reads namespace fds out of `/proc/1/ns/*` and `setns(2)`'s into each
   one at runtime, so the script ends up in the host's `mount`, `net`,
   `ipc`, `uts`, and `pid` namespaces regardless. We only need
   `hostPID` so `/proc/1` actually refers to host PID 1 rather than the
   container's init.
-- `securityContext.privileged: true` on the main container — provides
+- `securityContext.privileged: true` on the main container - provides
   the `CAP_SYS_ADMIN` that `setns()` requires.
 - An **init container** that copies the script from the ConfigMap onto a
   hostPath directory (`/var/lib/ko-controller/scripts/<id>.sh` by default).
@@ -39,7 +39,7 @@ Pod with:
   ```
 
   This is what makes the script effectively execute on the host itself,
-  with access to the host's filesystem, processes, network, and so on —
+  with access to the host's filesystem, processes, network, and so on -
   not inside the container's restricted namespaces.
 
 ## Lifecycle and status capture
@@ -47,11 +47,11 @@ Pod with:
 `Script.Execute` blocks until the Pod reaches `Succeeded` or `Failed`. On
 the way through, it records:
 
-- `status.nodes[*].scriptPodName` — the deterministic Pod name (so
+- `status.nodes[*].scriptPodName` - the deterministic Pod name (so
   `kubectl nm logs` can find it without listing).
-- `status.nodes[*].scriptExitCode` — the per-node exit code from the
+- `status.nodes[*].scriptExitCode` - the per-node exit code from the
   runner Pod's container status.
-- `status.nodes[*].message` — on failure, the last log chunk captured
+- `status.nodes[*].message` - on failure, the last log chunk captured
   from the Pod, for quick triage from `kubectl nm status`.
 
 A failed Script leaves the node **cordoned**. The trailing `Uncordon`
@@ -64,7 +64,7 @@ in a "needs attention" state, not silently recovered.
 ## When to use `runOnHost: false`
 
 The default `runOnHost: true` is what you want for anything that needs to
-touch the host directly — kernel patches, kubelet config edits, firmware
+touch the host directly - kernel patches, kubelet config edits, firmware
 flashes, on-disk file repairs.
 
 Pass `runOnHost: false` (CLI: `--in-pod`) to keep execution inside the
@@ -77,13 +77,13 @@ Pod's own namespaces. This is useful for:
 - **Distroless or scratch images** that don't ship `nsenter` and where
   building it in is more trouble than it's worth.
 
-The same `Cordon`/`Drain`/`Uncordon` safety wrapper still applies — you
+The same `Cordon`/`Drain`/`Uncordon` safety wrapper still applies - you
 just lose host-level execution inside the Script step itself.
 
 ## Pod Security Admission interactions
 
 Because the runner Pod uses `hostPID` and runs a container with
-`privileged: true` (those are the only host-namespace knobs we need —
+`privileged: true` (those are the only host-namespace knobs we need -
 `nsenter --target 1` setns()-es into the host's net/ipc/uts/mount
 namespaces at runtime, so we deliberately leave `hostNetwork` /
 `hostIPC` off), the **namespace it runs in must allow `privileged` Pod
@@ -97,5 +97,5 @@ metadata:
 
 The default `ko-system` namespace, when installed via the project's
 manifests, is already labelled `privileged`. Runner Pods always land in
-`ko-system` — the runner namespace is a fixed convention, not a runtime
+`ko-system` - the runner namespace is a fixed convention, not a runtime
 knob.
