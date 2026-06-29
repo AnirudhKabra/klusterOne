@@ -1,7 +1,7 @@
 # Types map
 
 A visual reference for the Go types in
-[`api/v1alpha1/nodemaintenance_types.go`](../api/v1alpha1/nodemaintenance_types.go) —
+[`api/v1alpha1/nodemaintenance_types.go`](../api/v1alpha1/nodemaintenance_types.go) -
 who contains who, what each field means, and where each piece of state
 ends up in `kubectl get nm`.
 
@@ -132,7 +132,7 @@ classDiagram
     NodeStatus ..> Phase : phase
 ```
 
-## Spec side — what the user sets
+## Spec side - what the user sets
 
 Target selection is mutually exclusive and resolved in this priority
 order (also enforced by the orchestrator at first reconcile):
@@ -158,21 +158,21 @@ NM was created.
 |---|---|---|---|
 | `paused` | `bool` | `false` (CRD-level default) | Stops the controller advancing. Used for the attach-then-run CLI flow. |
 | `allNodes` | `bool` | `false` (CRD-level default) | Wins over `nodeNames` and `nodeSelector`. |
-| `nodeSelector` | `map[string]string` | — | Ignored when `nodeNames` set or `allNodes` true. |
-| `nodeNames` | `[]string` | — | Wins over `nodeSelector`. Ignored when `allNodes` true. |
-| `script` | `*ScriptSpec` | — | When non-nil and `actions` empty → defaults to `[Cordon, Script, Uncordon]`. |
-| `actions` | `[]ActionSpec` | — | Ordered. See default-injection rule above. |
+| `nodeSelector` | `map[string]string` | - | Ignored when `nodeNames` set or `allNodes` true. |
+| `nodeNames` | `[]string` | - | Wins over `nodeSelector`. Ignored when `allNodes` true. |
+| `script` | `*ScriptSpec` | - | When non-nil and `actions` empty → defaults to `[Cordon, Script, Uncordon]`. |
+| `actions` | `[]ActionSpec` | - | Ordered. See default-injection rule above. |
 | `strategy` | `Strategy` | `{maxUnavailable:1}` | Concurrency / safety budget. |
 
 ### `ScriptSpec`
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `inline` | `string` | — | Script body. Materialized into ConfigMap `nm-<name>-script` in the runner namespace by the controller. |
+| `inline` | `string` | - | Script body. Materialized into ConfigMap `nm-<name>-script` in the runner namespace by the controller. |
 | `image` | `string` | `alpine:3.19` | Runner container image. |
 | `timeoutSeconds` | `*int64` | `600` | Per-node script execution cap. Min 1. |
-| `runOnHost` | `*bool` | `true` | When true, runner uses `nsenter` into PID 1 — host binaries / FS available. When false, runs inside the runner Pod only. |
-| `env` | `[]EnvVar` | — | Plain name/value pairs passed to the script. |
+| `runOnHost` | `*bool` | `true` | When true, runner uses `nsenter` into PID 1 - host binaries / FS available. When false, runs inside the runner Pod only. |
+| `env` | `[]EnvVar` | - | Plain name/value pairs passed to the script. |
 
 > See [script-action.md](./script-action.md) for how `runOnHost` changes
 > the runner Pod, and [security.md](./security.md) for why the script
@@ -196,9 +196,9 @@ NM was created.
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `maxUnavailable` | `int` | `1` | Max nodes in a non-terminal phase concurrently. Min 1. |
-| `atOnce` | `bool` | `false` | When true, runs against every target node in parallel — overrides `maxUnavailable`. |
+| `atOnce` | `bool` | `false` | When true, runs against every target node in parallel - overrides `maxUnavailable`. |
 
-## Status side — what the controller writes
+## Status side - what the controller writes
 
 ```mermaid
 flowchart LR
@@ -226,7 +226,7 @@ flowchart LR
 
 ### `StatusSummary`
 
-> None of these use `omitempty` — zero counts must serialize as `0` so
+> None of these use `omitempty` - zero counts must serialize as `0` so
 > the **Pending / InProgress / Done / Failed / Total** printer columns
 > render literal `0` instead of empty.
 
@@ -248,7 +248,7 @@ flowchart LR
 | `completedActions` | `[]string` | Append-only audit log; `len == len(actions)` ⇒ node `Completed`. |
 | `message` | `string` | Human-readable error / context. |
 | `lastTransitionTime` | `*metav1.Time` | Bumped on phase change. |
-| `scriptPodName` | `string` | Runner Pod for the Script action — used by `kubectl nm logs`. |
+| `scriptPodName` | `string` | Runner Pod for the Script action - used by `kubectl nm logs`. |
 | `scriptExitCode` | `*int32` | Pointer so unset and `0` are distinguishable. |
 | `scriptLogTail` | `string` | Last ~`Script.LogTailBytes` (default 4 KiB) of runner stdout/stderr, captured before pod GC. |
 
@@ -305,15 +305,15 @@ comes from in the Go types:
 | `Failed` | `.status.summary.failed` | `StatusSummary.Failed` | `-o wide` only |
 
 The three target-selection spec fields (`allNodes`, `nodeNames`,
-`nodeSelector`) are intentionally **not** exposed as printer columns —
+`nodeSelector`) are intentionally **not** exposed as printer columns -
 the `Targets` column already renders all three modes in one place, so
 separate columns would leave two of three blank in `-o wide`.
 
 ## See also
 
-- [crd-reference.md](./crd-reference.md) — annotated YAML spec + the
+- [crd-reference.md](./crd-reference.md) - annotated YAML spec + the
   `make generate manifests` codegen workflow.
-- [reconcile-flow.md](./reconcile-flow.md) — how this state graph
+- [reconcile-flow.md](./reconcile-flow.md) - how this state graph
   evolves tick-by-tick across a real run.
-- [architecture.md](./architecture.md) — where these types sit in the
+- [architecture.md](./architecture.md) - where these types sit in the
   CLI ↔ controller ↔ action-registry picture.

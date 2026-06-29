@@ -2,7 +2,7 @@
 
 `kubectl-nm` is a kubectl plugin that wraps the common workflows for
 authoring, attaching scripts to, pausing, and inspecting `NodeMaintenance`
-objects. It never talks to the controller directly — every command is a
+objects. It never talks to the controller directly - every command is a
 plain API-server write. For where it sits in the bigger picture, see
 [architecture.md](./architecture.md).
 
@@ -19,7 +19,7 @@ kubectl nm push   <local> <remote> [targets]      copy a local file onto nodes
 kubectl nm pull   <remote> <local> --node X       copy a node file back to local
 ```
 
-Both `pause` and `run` are idempotent — re-running them when the NM is
+Both `pause` and `run` are idempotent - re-running them when the NM is
 already in the target state prints a friendly message and does not issue a
 patch. `pause --reason "..."` stamps the operator-supplied reason onto the
 NM as the `ko.io/pause-reason` annotation, which `kubectl nm status`
@@ -49,14 +49,14 @@ See [script-action.md](./script-action.md) for what `--in-pod` and
 
 ## Two-phase workflow (attach → run)
 
-When `--paused` is set, both `--script` and `--inline` are optional — the
+When `--paused` is set, both `--script` and `--inline` are optional - the
 NM is created with an empty `spec.script.inline` and `attach` fills it in
 later. Without `--paused`, one of the two flags is still required
 (otherwise an empty no-op script would silently "succeed" on every
 targeted node).
 
 ```bash
-# Create the NM in paused mode — no script body required yet.
+# Create the NM in paused mode - no script body required yet.
 kubectl nm create rolling-patch --selector role=worker --paused
 
 # Drop in (or replace) the real script later.
@@ -68,13 +68,13 @@ kubectl nm run rolling-patch
 
 `attach` is a JSON-merge patch on `spec.script.inline`. The NM's
 `metadata.generation` bumps and the change shows up in API audit logs
-alongside every other spec mutation — re-scripting is auditable, not
+alongside every other spec mutation - re-scripting is auditable, not
 silent.
 
 ### Runner namespace and script storage
 
 The script `ConfigMap` always lives in `ko-system`, alongside the runner
-Pod. This is a fixed convention — there is no `--namespace` flag and the
+Pod. This is a fixed convention - there is no `--namespace` flag and the
 runner namespace cannot be overridden at run time.
 
 The CLI **never writes the ConfigMap directly**. The script body lives
@@ -93,7 +93,7 @@ kubectl get cm -n ko-system nm-<name>-script -o yaml
 
 This keeps the trust surface narrow:
 
-- operators only need `nodemaintenances.ko.io` RBAC to run scripts —
+- operators only need `nodemaintenances.ko.io` RBAC to run scripts -
   no `configmaps.update` in `ko-system`;
 - the controller's ServiceAccount is the only principal that may write
   script ConfigMaps; the `ValidatingAdmissionPolicy` in
@@ -129,14 +129,14 @@ nodes from being admitted. To hard-stop a running script, additionally
 delete the runner Pod after pausing.
 
 The exact semantics of "fence between actions" come from the orchestrator's
-one-action-per-Step invariant — see
+one-action-per-Step invariant - see
 [architecture.md](./architecture.md#what-happens-in-one-reconcile) and
 [reconcile-flow.md](./reconcile-flow.md) for the underlying state machine.
 
 ## File copy (`push` / `pull`)
 
 Both commands generate a one-shot `NodeMaintenance` with a single `Script`
-action — no cordon, drain, or uncordon. The CLI waits for completion and
+action - no cordon, drain, or uncordon. The CLI waits for completion and
 (by default) deletes the NM afterward. Pass `--keep` to inspect it.
 
 ### `kubectl nm push <local-path> <remote-path>`
@@ -164,7 +164,7 @@ sentinels and writes it to stdout. The controller copies the pod's full
 stdout into a dedicated `ConfigMap` (`nm-<name>-output` in `ko-system`)
 *before* deleting the pod; the CLI then reads that CM and decodes the
 payload locally. The output CM is owned by the NM, so it's GC'd
-automatically — no orphaned payloads. `--node` is required.
+automatically - no orphaned payloads. `--node` is required.
 
 ```bash
 kubectl nm pull /var/log/audit.log ./audit.log --node node-1

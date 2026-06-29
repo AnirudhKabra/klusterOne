@@ -66,18 +66,18 @@ flowchart LR
 
 The system has three independently-evolving pieces:
 
-- **`kubectl-nm` CLI** — does plain API-server writes against
+- **`kubectl-nm` CLI** - does plain API-server writes against
   `NodeMaintenance` CRs only (script body lives on `spec.script.inline`,
   pause/run patches on `spec.paused`). The CLI never writes ConfigMaps
   in `ko-system`; the controller materializes them. See
   [cli.md](./cli.md) for the full reference and
   [security.md](./security.md) for the trust boundary.
-- **`ko-controller`** — a controller-runtime manager watching
+- **`ko-controller`** - a controller-runtime manager watching
   `NodeMaintenance`. The reconciler is intentionally thin; it delegates one
   **Step** to the orchestrator per reconcile.
-- **Action Registry** — pluggable units (`Cordon`, `Drain`, `Uncordon`,
+- **Action Registry** - pluggable units (`Cordon`, `Drain`, `Uncordon`,
   `Script`) keyed by `ActionType`. The orchestrator never knows what an
-  action *does* — only that `Execute` either succeeds or fails for one
+  action *does* - only that `Execute` either succeeds or fails for one
   node. See [script-action.md](./script-action.md) for how the Script
   action in particular materializes its runner Pod.
 
@@ -104,7 +104,7 @@ sequenceDiagram
         end
         opt spec.script != nil
             R->>API: EnsureScriptConfigMap
-            Note over R: writes nm-NAME-script in ko-system<br/>idempotent — runs even when paused<br/>so the CM is inspectable pre-launch
+            Note over R: writes nm-NAME-script in ko-system<br/>idempotent - runs even when paused<br/>so the CM is inspectable pre-launch
         end
         alt nm paused
             R-->>API: Result{RequeueAfter: 15s}
@@ -160,6 +160,6 @@ stateDiagram-v2
 The run-level `status.phase` is just a `rollup` of these per-node phases:
 `InProgress` while any node is non-terminal, `Failed` if any node ended
 `Failed`, otherwise `Completed`. A `Failed` node intentionally **stops
-mid-chain** — if `Drain` fails the `Script` and `Uncordon` after it are
+mid-chain** - if `Drain` fails the `Script` and `Uncordon` after it are
 skipped, so the cluster operator sees the cordon still in place as a "do
 not auto-recover" signal.

@@ -34,14 +34,14 @@ spec:
 - **3 target nodes**: `node-a`, `node-b`, `node-c`.
 - **Budget**: `maxUnavailable: 2` → at most 2 nodes are `InProgress` at any time.
 - **Action plan**: `[Cordon, Script, Uncordon]` (the default synthesized when
-  `spec.actions` is empty but `script` is attached — see `EffectiveActions`).
+  `spec.actions` is empty but `script` is attached - see `EffectiveActions`).
 - **Tick**: the controller requeues every 10s while there's still work, so
   reconcile boundaries are at `t = 0s, 10s, 20s, …`.
 
 This run will take **6 reconciles ≈ 60 s** + however long each Script takes to
 finish on the node.
 
-## 1. What one reconcile does — the call graph
+## 1. What one reconcile does - the call graph
 
 ```mermaid
 flowchart TB
@@ -114,7 +114,7 @@ What to take away from this picture:
   `spec.paused` and (if not paused) hand off to `Step`.
 - **Init and EnsureScriptConfigMap run even while paused.** Pause is a
   fence against *execution* (no Pod creation, no action advancement); it
-  is **not** a fence against *observability* — `kubectl get nm` and
+  is **not** a fence against *observability* - `kubectl get nm` and
   `kubectl get cm -n ko-system` light up immediately on apply, paused or
   not.
 - **Step is still a four-stage pipeline** (`initStatus` → `admit` →
@@ -124,7 +124,7 @@ What to take away from this picture:
   there's nothing to seed. The call survives as a belt-and-braces guard
   against a hypothetical Step-without-Init path.
 - **Action dispatch is one map lookup.** The Orchestrator never knows what an
-  Action does — it only calls `Execute` and checks the error.
+  Action does - it only calls `Execute` and checks the error.
 
 ## 2. Per-node phase machine
 
@@ -175,7 +175,7 @@ flowchart LR
 
 Critically: a node that **fails** in the middle of the chain **stops there**.
 If `Script` fails on `node-a`, the orchestrator does **not** run the trailing
-`Uncordon` — `node-a` stays cordoned as a "do not auto-recover" signal for
+`Uncordon` - `node-a` stays cordoned as a "do not auto-recover" signal for
 the operator. The other nodes are unaffected and continue.
 
 ## 4. The 3-node example, reconcile by reconcile
@@ -277,7 +277,7 @@ Things to notice from this layout:
   (budget was 2, both fit), and from then on `advanceNode` ticks them through
   the plan one action at a time.
 - **`node-c` waits for three ticks** even though there's nothing wrong with it
-  — the budget is purely a function of how many nodes are *currently*
+  - the budget is purely a function of how many nodes are *currently*
   `InProgress`. The instant `a` and `b` transition to `Completed` at the end
   of R3, the next reconcile's `admit` sees `inFlight=0` and promotes `c`.
 - **There is no parallelism between `a/b` and `c`.** With `maxUnavailable=2`
@@ -286,7 +286,7 @@ Things to notice from this layout:
   three rows would start at R1 and the whole run would finish in 3 reconciles
   instead of 6.
 
-## 6. Snapshot table — state at each reconcile boundary
+## 6. Snapshot table - state at each reconcile boundary
 
 | Tick | node-a                | node-b                | node-c                | summary (p/ip/c/f) | run Phase  |
 |------|-----------------------|-----------------------|-----------------------|--------------------|------------|
@@ -307,11 +307,11 @@ Things to notice from this layout:
 NAME   PHASE        PAUSED   TARGETS                       DONE   TOTAL   AGE
 demo   InProgress   false    nodes:node-a,node-b,node-c    0      3       10s
 
-# After R#3 (t≈30s) — a and b just finished
+# After R#3 (t≈30s) - a and b just finished
 NAME   PHASE        PAUSED   TARGETS                       DONE   TOTAL   AGE
 demo   InProgress   false    nodes:node-a,node-b,node-c    2      3       30s
 
-# After R#6 (t≈60s) — run terminal
+# After R#6 (t≈60s) - run terminal
 NAME   PHASE        PAUSED   TARGETS                       DONE   TOTAL   AGE
 demo   Completed    false    nodes:node-a,node-b,node-c    3      3       60s
 ```
@@ -323,15 +323,15 @@ and `status.summary.total`, which `rollup` recomputes from
 ## 7. The budget math (why `node-c` waits)
 
 `admit` runs **at the start of every reconcile** and rebalances. It only
-cares about *currently-InProgress* nodes — Completed nodes free up budget for
+cares about *currently-InProgress* nodes - Completed nodes free up budget for
 the next Pending one.
 
 | Tick | InProgress entering admit | inFlight | budget | promotions    | InProgress leaving admit |
 |------|---------------------------|----------|--------|---------------|--------------------------|
-| R#1  | —                         | 0        | 2      | a, b          | a, b                     |
+| R#1  | -                         | 0        | 2      | a, b          | a, b                     |
 | R#2  | a, b                      | 2        | 2      | none (full)   | a, b                     |
 | R#3  | a, b                      | 2        | 2      | none (full)   | a, b                     |
-| R#4  | — *(a, b → Completed)*    | 0        | 2      | **c**         | c                        |
+| R#4  | - *(a, b → Completed)*    | 0        | 2      | **c**         | c                        |
 | R#5  | c                         | 1        | 2      | none (no Pending left) | c               |
 | R#6  | c                         | 1        | 2      | none          | c                        |
 
@@ -432,7 +432,7 @@ func (o *Orchestrator) advanceNode(ctx context.Context, nm *kov1alpha1.NodeMaint
 The Reconciler-side pre-`Step` work (`Init` seeding, `EnsureScriptConfigMap`,
 paused short-circuit) lives in
 [`internal/controller/nodemaintenance_controller.go`](../internal/controller/nodemaintenance_controller.go)
-— see the ASCII flow at the top of that file for the exact ordering.
+- see the ASCII flow at the top of that file for the exact ordering.
 
 The Registry that `advanceNode` dispatches through is defined in
 [`internal/actions/action.go`](../internal/actions/action.go) and populated
@@ -452,7 +452,7 @@ at controller startup in
    any action you add.
 3. **`admit` is dynamic, not one-shot.** It runs every reconcile and
    recomputes `inFlight` each time. That's why `node-c` gets promoted the
-   instant `node-a` and `node-b` transition to Completed — without any
+   instant `node-a` and `node-b` transition to Completed - without any
    re-resolution of the target list (`initStatus` froze that at R#1).
 4. **A Failed node stops mid-chain.** It does **not** continue to subsequent
    actions. This is intentional: a Drain failure leaves the node cordoned so
@@ -465,10 +465,10 @@ at controller startup in
 
 ## 10. Variations worth knowing
 
-- **`spec.strategy.atOnce: true`** — `effectiveBudget` returns
+- **`spec.strategy.atOnce: true`** - `effectiveBudget` returns
   `len(status.Nodes)`, so all nodes get promoted in R#1 and the run finishes
   in `len(plan)` reconciles instead of `len(plan) * ceil(N/maxUnavailable)`.
-- **`spec.paused: true`** — pause gates *execution*, not *observability*.
+- **`spec.paused: true`** - pause gates *execution*, not *observability*.
   The Reconciler still:
     1. seeds status on the first reconcile (so `PHASE / TARGETS / TOTAL`
        light up in `kubectl get nm` immediately);
@@ -480,7 +480,7 @@ at controller startup in
   runs to completion; the **next** action is the one blocked. To
   hard-stop a running Script, also
   `kubectl delete pod nm-<name>-<node>`.
-- **Failed nodes mid-run** — the run continues for the other nodes. After
+- **Failed nodes mid-run** - the run continues for the other nodes. After
   the last node settles, `rollup` sees `failed > 0` and sets the run Phase
   to `Failed`. Surviving nodes can be re-driven by deleting the NM and
   re-creating it.
