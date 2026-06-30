@@ -48,7 +48,9 @@ The reply maps your **Kind → resource (plural)**, which is the part used in UR
 NodeMaintenance   ──►   nodemaintenances
 ```
 
-That mapping exists because you applied the **CRD** (`[ko.io_nodemaintenances.yaml](../config/crd/ko.io_nodemaintenances.yaml)`) - its `plural: nodemaintenances` and `scope: Cluster` are exactly what discovery reports. So the final URL is:
+The resource name is **plural** because an endpoint represents a *collection* of objects. You read or create within the collection at `/.../nodemaintenances`, and address a single object by appending its name `/.../nodemaintenances/<name>` - just like `/users` vs `/users/42` in any REST API.
+
+That mapping exists because you applied the **CRD** ([ko.io_nodemaintenances.yaml](../config/crd/ko.io_nodemaintenances.yaml)) - its `plural: nodemaintenances` and `scope: Cluster` are exactly what discovery reports. So the final URL is:
 
 ```
 /apis/ko.io/v1alpha1/nodemaintenances              # the collection
@@ -129,8 +131,6 @@ func init() {
 	SchemeBuilder.Register(&NodeMaintenance{}, &NodeMaintenanceList{})
 }
 ```
-
-
 
 ### How SchemeBuilder fills the table
 
