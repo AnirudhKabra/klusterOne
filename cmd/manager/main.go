@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -35,8 +34,8 @@ var (
 */
 
 func init() {
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme)) //Adding built-in k8s resources to the scheme...
-	utilruntime.Must(kov1alpha1.AddToScheme(scheme))     //Adding our custom resource to the scheme...
+	// utilruntime.Must(clientgoscheme.AddToScheme(scheme)) //Adding built-in k8s resources to the scheme...
+	utilruntime.Must(kov1alpha1.AddToScheme(scheme)) //Adding our custom resource to the scheme...
 
 	/*
 		SchemeBuilder.Register(...)
